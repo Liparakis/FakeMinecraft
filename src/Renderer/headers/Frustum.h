@@ -74,7 +74,7 @@ public:
      * @param extents The half-extents (dimensions divided by 2) of the AABB.
      * @return true if the box is visible (inside or intersecting), false if culled.
      */
-    [[nodiscard]] inline bool isBoxVisible(const glm::vec3 &center, const glm::vec3 &extents) const {
+    [[nodiscard]] bool isBoxVisible(const glm::vec3 &center, const glm::vec3 &extents) const {
 #ifdef FRUSTUM_USE_SIMD
         // Load center and extents into SIMD registers
         const __m128 cx = _mm_set1_ps(center.x);

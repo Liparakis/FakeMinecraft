@@ -89,12 +89,6 @@ public:
     // RENDERING (ChunkRendering.cpp)
     // ========================================================================
     void uploadMesh();
-
-    // Per-subchunk rendering (legacy)
-    void renderSolid(int subChunkIndex);
-    void renderBillboard(int subChunkIndex) const;
-    void renderWater(int subChunkIndex) const;
-
     // Helper functions to draw everything in the chunk at once.
     void renderAllSolid();
     void renderAllBillboard() const;

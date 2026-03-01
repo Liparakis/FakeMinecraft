@@ -22,7 +22,7 @@ namespace {
      * @brief This helps us get the chunk index from world coordinates.
      * It handles negative coordinates correctly by using flooring.
      */
-    [[gnu::always_inline, msvc::forceinline]]
+    [[gnu::always_inline]]
     int worldToChunkCoord(float worldCoord, int chunkSize) {
         return fastFloor(worldCoord / static_cast<float>(chunkSize));
     }
@@ -30,7 +30,7 @@ namespace {
     /**
      * @brief Extracts the fractional part of a float (always in range [0, 1)).
      */
-    [[gnu::always_inline, msvc::forceinline]]
+    [[gnu::always_inline]]
     float fract(float x) {
         return x - std::floor(x);
     }

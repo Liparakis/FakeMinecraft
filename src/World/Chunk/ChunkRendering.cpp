@@ -89,8 +89,8 @@ void Chunk::uploadMesh() {
     
     // Update culling bounds to match actual geometry (tight bounding box)
     if (minY != INT16_MAX && maxY != INT16_MIN) {
-        float geometryMinY = static_cast<float>(minY);
-        float geometryMaxY = static_cast<float>(maxY);
+        float geometryMinY = (minY);
+        float geometryMaxY = (maxY);
         float geometryHeight = geometryMaxY - geometryMinY;
         
         cullingCenter = glm::vec3(
@@ -218,43 +218,6 @@ void Chunk::uploadMesh() {
     }
 
     ready = true;
-}
-
-// Legacy per-subchunk rendering (kept for backward compatibility)
-void Chunk::renderSolid(const int subChunkIndex) {
-    if (!ready) {
-        if (generated) {
-            uploadMesh();
-        } else {
-            return;
-        }
-    }
-
-    const SubChunk& sc = subChunks[subChunkIndex];
-    if (sc.numTrianglesWorld == 0 || sc.worldVAO == 0) return;
-    
-    glBindVertexArray(sc.worldVAO);
-    glDrawElements(GL_TRIANGLES, sc.numTrianglesWorld, GL_UNSIGNED_INT, 0);
-}
-
-void Chunk::renderBillboard(const int subChunkIndex) const {
-    if (!ready) return;
-    
-    const SubChunk& sc = subChunks[subChunkIndex];
-    if (sc.numTrianglesBillboard == 0 || sc.billboardVAO == 0) return;
-
-    glBindVertexArray(sc.billboardVAO);
-    glDrawElements(GL_TRIANGLES, sc.numTrianglesBillboard, GL_UNSIGNED_INT, 0);
-}
-
-void Chunk::renderWater(const int subChunkIndex) const {
-    if (!ready) return;
-    
-    const SubChunk& sc = subChunks[subChunkIndex];
-    if (sc.numTrianglesLiquid == 0 || sc.waterVAO == 0) return;
-
-    glBindVertexArray(sc.waterVAO);
-    glDrawElements(GL_TRIANGLES, sc.numTrianglesLiquid, GL_UNSIGNED_INT, 0);
 }
 
 // Render all solid geometry in ONE draw call using merged VAO
