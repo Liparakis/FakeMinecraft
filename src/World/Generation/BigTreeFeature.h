@@ -37,7 +37,7 @@ public:
         // Check ground block
         const int idx = calculateIndex(localX, localZ, localY - 1);
         const uint8_t groundBlock = chunkData[idx];
-        return groundBlock == Blocks::GRASS_BLOCK || groundBlock == Blocks::DIRT;
+        return Blocks::isSoil(groundBlock);
     }
 
     [[nodiscard]] bool place(uint8_t* chunkData,

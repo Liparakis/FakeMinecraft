@@ -39,7 +39,7 @@ public:
         const int belowIdx = calculateIndex(localX, localZ, localY - 1);
         const uint8_t belowBlock = chunkData[belowIdx];
 
-        return belowBlock == Blocks::GRASS_BLOCK || belowBlock == Blocks::DIRT;
+        return Blocks::isSoil(belowBlock);
     }
 
     [[nodiscard]] bool place(uint8_t* chunkData,

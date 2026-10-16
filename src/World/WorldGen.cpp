@@ -9,6 +9,7 @@
 #include "ChunkPos.h"
 #include "Generation/BiomeRegistry.h"
 #include "Generation/Feature.h"
+#include "Generation/Terrain.h"
 
 /**
  * @file WorldGen.cpp
@@ -37,8 +38,8 @@ namespace {
      * @brief A small cache for noise values so we don't have to keep recalculating them.
      */
     struct alignas(64) NoiseCache {
-        int16_t surfaceHeight[CHUNK_WIDTH][CHUNK_WIDTH]; ///< Calculated height including biome blending.
-        uint8_t biomeID[CHUNK_WIDTH][CHUNK_WIDTH]; ///< ID of the primary biome for this column.
+        int16_t surfaceHeight[CHUNK_WIDTH][CHUNK_WIDTH]; ///< Terrain height of each column.
+        uint8_t slope[CHUNK_WIDTH][CHUNK_WIDTH]; ///< Largest height step to a neighbouring column.
         const Biome *biomePtr[CHUNK_WIDTH][CHUNK_WIDTH]; ///< Cached pointer for fast property access.
     };
 
@@ -197,24 +198,17 @@ namespace {
         }
     };
 
-    // Precomputed noise sample offsets for blending
-    struct BlendSampleOffsets {
-        int dx[9];
-        int dz[9];
-        int count;
-
-        constexpr BlendSampleOffsets(int radius) : dx{}, dz{}, count(0) {
-            for (int x = -radius; x <= radius; x += radius) {
-                for (int z = -radius; z <= radius; z += radius) {
-                    dx[count] = x;
-                    dz[count] = z;
-                    ++count;
-                }
-            }
-        }
-    };
-
-    constexpr BlendSampleOffsets BLEND_OFFSETS(12);
+    /// Repeating terracotta layers for badlands, indexed by world Y.
+    uint8_t terracottaBand(const int worldY) {
+        const uint8_t bands[] = {
+            Blocks::TERRACOTTA, Blocks::ORANGE_TERRACOTTA, Blocks::ORANGE_TERRACOTTA, Blocks::YELLOW_TERRACOTTA,
+            Blocks::TERRACOTTA, Blocks::WHITE_TERRACOTTA, Blocks::RED_TERRACOTTA, Blocks::RED_TERRACOTTA,
+            Blocks::TERRACOTTA, Blocks::BROWN_TERRACOTTA, Blocks::ORANGE_TERRACOTTA, Blocks::LIGHT_GRAY_TERRACOTTA,
+            Blocks::TERRACOTTA, Blocks::YELLOW_TERRACOTTA, Blocks::RED_TERRACOTTA, Blocks::TERRACOTTA,
+            Blocks::WHITE_TERRACOTTA, Blocks::BROWN_TERRACOTTA,
+        };
+        return bands[worldY % std::size(bands)];
+    }
 }
 
 // ============================================================================
@@ -230,10 +224,7 @@ void WorldGen::generateChunkData(const ChunkPos chunkPos, uint8_t *chunkData, co
      * Generators are kept alive across calls to avoid initialization overhead.
      */
     thread_local struct NoiseContext {
-        OSN::Noise<2> terrainNoise;
-        OSN::Noise<2> tempNoise;
-        OSN::Noise<2> humidityNoise;
-        OSN::Noise<2> continentalNoise;
+        TerrainSampler terrain;
         OSN::Noise<3> noise3D;
         long cachedSeed = -1;
 
@@ -243,10 +234,7 @@ void WorldGen::generateChunkData(const ChunkPos chunkPos, uint8_t *chunkData, co
          */
         void initIfNeeded(long newSeed) {
             if (cachedSeed != newSeed) [[unlikely]] {
-                terrainNoise = OSN::Noise<2>(newSeed);
-                tempNoise = OSN::Noise<2>(newSeed + 1);
-                humidityNoise = OSN::Noise<2>(newSeed + 2);
-                continentalNoise = OSN::Noise<2>(newSeed + 4);
+                terrain = TerrainSampler(newSeed);
                 noise3D = OSN::Noise<3>(newSeed + 3);
                 cachedSeed = newSeed;
             }
@@ -264,79 +252,36 @@ void WorldGen::generateChunkData(const ChunkPos chunkPos, uint8_t *chunkData, co
 
     // Early exit for out-of-bounds chunks
     // Culling: Chunks above space or below core are skipped
-    if (startY > MAX_HEIGHT + 64 || endY < 0) [[unlikely]] {
+    if (startY >= MAX_HEIGHT || endY < 0) [[unlikely]] {
         std::memset(chunkData, 0, CHUNK_WIDTH * CHUNK_WIDTH * CHUNK_HEIGHT);
         return;
     }
 
     // -------------------------------------------------------------------------
-    // PASS 1: Biome & Height Pass (Optimized Column-based)
+    // PASS 1: Terrain height & biome per column
     // -------------------------------------------------------------------------
+    // Heights are sampled with a 1-column border so slopes are correct at chunk edges.
     thread_local NoiseCache cache;
+    thread_local ColumnSample samples[CHUNK_WIDTH][CHUNK_WIDTH];
+    thread_local int16_t bordered[CHUNK_WIDTH + 2][CHUNK_WIDTH + 2];
     auto &registry = BiomeRegistry::getInstance();
 
-    // Precompute noise scale factors
-    constexpr float TEMP_SCALE = 0.001f;
-    constexpr float HUMID_SCALE = 0.001f;
-    constexpr float CONT_SCALE = 0.0005f;
-    constexpr float TERRAIN_SCALE = 0.005f;
-    constexpr float DETAIL_SCALE = 0.05f;
+    for (int x = -1; x <= static_cast<int>(CHUNK_WIDTH); ++x) {
+        for (int z = -1; z <= static_cast<int>(CHUNK_WIDTH); ++z) {
+            const ColumnSample s = noise.terrain.sample(static_cast<float>(startX + x), static_cast<float>(startZ + z));
+            bordered[x + 1][z + 1] = static_cast<int16_t>(s.height);
+            if (x >= 0 && z >= 0 && x < static_cast<int>(CHUNK_WIDTH) && z < static_cast<int>(CHUNK_WIDTH)) samples[x][z] = s;
+        }
+    }
 
     for (int x = 0; x < CHUNK_WIDTH; ++x) {
-        const float wx = static_cast<float>(startX + x);
-
         for (int z = 0; z < CHUNK_WIDTH; ++z) {
-            const float wz = static_cast<float>(startZ + z);
-
-            // 1.1 Calculate climate noise
-            const float temp = (noise.tempNoise.eval(wx * TEMP_SCALE, wz * TEMP_SCALE) + 1.0f) * 0.5f;
-            const float humid = (noise.humidityNoise.eval(wx * HUMID_SCALE, wz * HUMID_SCALE) + 1.0f) * 0.5f;
-            const float cont = noise.continentalNoise.eval(wx * CONT_SCALE, wz * CONT_SCALE);
-
-            const Biome &biome = registry.getBiome(temp, humid, cont);
-            cache.biomeID[x][z] = biome.id;
-            cache.biomePtr[x][z] = &biome; // Cache pointer
-
-            // 1.2 Ultra-Smooth Height Blending (Optimized)
-            float totalBaseHeight = 0.0f;
-            float totalMultiplier = 0.0f;
-
-            // Use precomputed offsets
-            for (int i = 0; i < BLEND_OFFSETS.count; ++i) {
-                const float sampleWX = wx + BLEND_OFFSETS.dx[i];
-                const float sampleWZ = wz + BLEND_OFFSETS.dz[i];
-
-                const float sTemp = (noise.tempNoise.eval(sampleWX * TEMP_SCALE, sampleWZ * TEMP_SCALE) + 1.0f) * 0.5f;
-                const float sHumid = (noise.humidityNoise.eval(sampleWX * HUMID_SCALE, sampleWZ * HUMID_SCALE) + 1.0f) *
-                                     0.5f;
-                const float sCont = noise.continentalNoise.eval(sampleWX * CONT_SCALE, sampleWZ * CONT_SCALE);
-
-                const Biome &b = registry.getBiome(sTemp, sHumid, sCont);
-                totalBaseHeight += b.baseHeight;
-                totalMultiplier += b.heightMultiplier;
-            }
-
-            // Constant reciprocal multiplication
-            constexpr float INV_SAMPLES = 1.0f / 9.0f;
-            const float blendedBaseHeight = totalBaseHeight * INV_SAMPLES;
-            const float blendedMultiplier = totalMultiplier * INV_SAMPLES;
-
-            // Terrain noise with ridging
-            const float n = noise.terrainNoise.eval(wx * TERRAIN_SCALE, wz * TERRAIN_SCALE);
-            const float ridgeN = 1.0f - std::abs(n);
-            const float blendedN = ridgeN * 0.7f + (n + 1.0f) * 0.15f;
-            const float detailN = noise.terrainNoise.eval(wx * DETAIL_SCALE, wz * DETAIL_SCALE) * 0.1f;
-
-            float height = blendedBaseHeight + (blendedN + detailN) * 50.0f * blendedMultiplier;
-
-            // Branchless ocean depth adjustment
-            const bool isOcean = (biome.id == 5);
-            const bool needsAdjust = (height > WATER_LEVEL - 4);
-            if (isOcean && needsAdjust) [[unlikely]] {
-                height = WATER_LEVEL - 4 - (WATER_LEVEL - height) * 0.1f;
-            }
-
-            cache.surfaceHeight[x][z] = static_cast<int16_t>(height);
+            const int h = bordered[x + 1][z + 1];
+            const int slope = std::max({std::abs(bordered[x][z + 1] - h), std::abs(bordered[x + 2][z + 1] - h),
+                                        std::abs(bordered[x + 1][z] - h), std::abs(bordered[x + 1][z + 2] - h)});
+            cache.surfaceHeight[x][z] = static_cast<int16_t>(h);
+            cache.slope[x][z] = static_cast<uint8_t>(std::min(slope, 255));
+            cache.biomePtr[x][z] = &registry.getBiome(TerrainSampler::classify(samples[x][z], slope));
         }
     }
 
@@ -349,16 +294,31 @@ void WorldGen::generateChunkData(const ChunkPos chunkPos, uint8_t *chunkData, co
     caveNoise.fill(noise.noise3D, startX, startY, startZ, caveSettings);
 
     // -------------------------------------------------------------------------
-    // PASS 3: Volume Fill (Optimized for cache locality)
+    // PASS 3: Volume Fill
     // -------------------------------------------------------------------------
-    // Process in cache-friendly order (Z-Y-X for column-major)
+    constexpr int STEEP_SLOPE = 4;
+    constexpr int SNOW_LINE = 172;
+
     for (int x = 0; x < CHUNK_WIDTH; ++x) {
         for (int z = 0; z < CHUNK_WIDTH; ++z) {
             const int surfaceY = cache.surfaceHeight[x][z];
-            const Biome *biome = cache.biomePtr[x][z]; // Use cached pointer
+            const int slope = cache.slope[x][z];
+            const Biome *biome = cache.biomePtr[x][z];
             const int baseIndex = x * CHUNK_WIDTH * CHUNK_HEIGHT + z * CHUNK_HEIGHT;
+            const bool underwater = surfaceY < WATER_LEVEL;
+            const bool steep = slope >= STEEP_SLOPE;
+            const bool snowCapped = !underwater && surfaceY >= SNOW_LINE + static_cast<int>(fastHash(startX + x, startZ + z, seed, 99) % 6);
 
-            // Prefetch next column
+            uint8_t top = biome->surfaceBlock;
+            uint8_t under = biome->underBlock;
+            if (underwater) {
+                top = biome->underwaterBlock;
+            } else if (snowCapped) {
+                top = Blocks::SNOW;
+            } else if (steep) {
+                top = under = biome->steepBlock;
+            }
+
             if (z < CHUNK_WIDTH - 1) {
                 PREFETCH(&chunkData[x * CHUNK_WIDTH * CHUNK_HEIGHT + (z + 1) * CHUNK_HEIGHT], 1, 1);
             }
@@ -373,23 +333,26 @@ void WorldGen::generateChunkData(const ChunkPos chunkPos, uint8_t *chunkData, co
                 }
 
                 if (worldY > surfaceY) [[likely]] {
-                    chunkData[index] = (worldY <= WATER_LEVEL) ? Blocks::WATER : Blocks::AIR;
+                    if (worldY > WATER_LEVEL) chunkData[index] = Blocks::AIR;
+                    else chunkData[index] = (worldY == WATER_LEVEL && biome->frozenWater) ? Blocks::ICE : Blocks::WATER;
                     continue;
                 }
 
-                // Cave check only when underground
-                const float cv = caveNoise.get(x, y, z);
-                if (cv > caveSettings.chance) [[unlikely]] {
+                // Caves rarely breach the surface and never open into the sea floor.
+                const int depth = surfaceY - worldY;
+                const float surfaceSeal = underwater ? (depth < 6 ? 1.0f : 0.0f)
+                                                     : 0.45f * (1.0f - terrain::smoothstep(0.0f, 10.0f, static_cast<float>(depth)));
+                if (caveNoise.get(x, y, z) > caveSettings.chance + surfaceSeal) [[unlikely]] {
                     chunkData[index] = Blocks::AIR;
                     continue;
                 }
 
-                // Reduced branching for layer selection
-                if (worldY == surfaceY) [[unlikely]] {
-                    chunkData[index] = (worldY >= WATER_LEVEL) ? biome->surfaceBlock : Blocks::SAND;
+                if (biome->terracottaBands && !underwater && depth < 24 && (depth > 0 || steep)) {
+                    chunkData[index] = terracottaBand(worldY);
+                } else if (depth == 0) {
+                    chunkData[index] = top;
                 } else {
-                    const int depth = surfaceY - worldY;
-                    chunkData[index] = (depth < 4) ? biome->underBlock : biome->deepBlock;
+                    chunkData[index] = (depth < biome->underDepth) ? under : Blocks::STONE;
                 }
             }
         }

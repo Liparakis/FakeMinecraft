@@ -34,7 +34,6 @@ namespace {
     constexpr uint32_t HASH_LAVA = hashCString("LAVA");
     constexpr uint32_t HASH_TALL_GRASS_BOTTOM = hashCString("TALL_GRASS_BOTTOM");
     constexpr uint32_t HASH_TALL_GRASS_TOP = hashCString("TALL_GRASS_TOP");
-    constexpr uint32_t HASH_GRASS_BLOCK = hashCString("GRASS_BLOCK");
 
     /**
      * @brief Converts simple block coordinates to chunk-relative coordinates.
@@ -596,7 +595,7 @@ void GameObject::updateShaders() {
     const glm::vec3 sunCol = sky.getSunColor();
     const float ambient = sky.getAmbientStrength();
 
-    // Clear GL errors
+    // SGG's Shader asserts no GL error is pending, so stale errors from earlier passes must be drained.
     while (glGetError() != GL_NO_ERROR);
 
     // Batch shader uniform updates
@@ -1325,8 +1324,7 @@ void GameObject::handleBlockPlace(const Physics::RaycastResult &result) const {
     const Block &selectedBlockData = BlockRegistry::getInstance().getBlock(gameState.selectedBlock);
     if (selectedBlockData.blockType == Block::BILLBOARD) [[unlikely]] {
         const uint16_t blockBelow = chunk->getBlockAtPos(localBlockX, localBlockY - 1, localBlockZ);
-        const uint32_t belowHash = hashCString(BlockRegistry::getInstance().getBlock(blockBelow).blockName);
-        if (belowHash != HASH_GRASS_BLOCK) {
+        if (!Blocks::isSoil(static_cast<uint8_t>(blockBelow))) {
             return;
         }
     }

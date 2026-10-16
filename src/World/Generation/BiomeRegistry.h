@@ -1,11 +1,14 @@
 #pragma once
 
 #include <array>
+#include <cstdio>
 #include <memory>
-#include <string_view>
+#include <vector>
 #include "Biome.h"
 #include "TreeFeature.h"
 #include "BigTreeFeature.h"
+#include "ConiferTreeFeature.h"
+#include "CactusFeature.h"
 #include "OreFeature.h"
 #include "VegetationFeature.h"
 #include "LakeFeature.h"
@@ -13,307 +16,175 @@
 
 /**
  * @class BiomeRegistry
- * @brief Manages all the different biomes available in the game.
- * 
- * It helps find the right biome for a given location based on temperature 
- * and humidity.
+ * @brief Owns every biome definition and the features they place.
+ *
+ * Which biome a column gets is decided by TerrainSampler::classify (Terrain.h).
  */
 class BiomeRegistry {
 public:
-    // Total number of biomes (compile-time constant)
-    static constexpr size_t BIOME_COUNT = 6;
-
-    // Biome IDs (for clarity and type safety)
-    enum BiomeID : uint8_t {
-        PLAINS = 0,
-        DESERT = 1,
-        FOREST = 2,
-        MOUNTAINS = 3,
-        BEACH = 4,
-        OCEAN = 5
-    };
-
     static BiomeRegistry& getInstance() noexcept {
         static BiomeRegistry instance;
         return instance;
     }
 
-    // Figures out the biome for a block based on the environmental values.
-    [[nodiscard]] const Biome& getBiome(const float temp, const float humid, const float cont) const noexcept {
-        // Ocean check - if the continental noise is very low, it's deep water.
-        if (cont < -0.2f) {
-            return biomes[OCEAN];
-        }
-
-        // Beach check - transition zone
-        if (cont < 0.05f) {
-            return biomes[BEACH];
-        }
-
-        // Desert check - specific high temp + low humid condition
-        // Check this before general ranges as it's a specific override
-        if (temp > 0.8f && humid < 0.2f) {
-            return biomes[DESERT];
-        }
-
-        // Inline range checks for remaining biomes (0-3) to avoid loop overhead
-        // Ordered by likelihood for better branch prediction
-
-        // Plains (most common fallback) - check last for best average case
-        if (temp >= 0.3f && temp <= 0.7f && humid >= 0.3f && humid <= 0.7f) {
-            return biomes[PLAINS];
-        }
-
-        // Forest (high humidity)
-        if (temp >= 0.4f && temp <= 0.8f && humid >= 0.6f && humid <= 1.0f) {
-            return biomes[FOREST];
-        }
-
-        // Mountains (cold)
-        if (temp >= 0.0f && temp <= 0.3f) {
-            return biomes[MOUNTAINS];
-        }
-
-        // Default fallback to plains
-        return biomes[PLAINS];
-    }
-
-    [[nodiscard]] const Biome& getBiome(const uint8_t id) const noexcept {
-        // Bounds check with early return (avoid branch misprediction)
-        if (id >= BIOME_COUNT) [[unlikely]] {
-            return biomes[PLAINS];
-        }
-        return biomes[id];
-    }
-
-    [[nodiscard]] const std::array<Biome, BIOME_COUNT>& getAllBiomes() const noexcept {
-        return biomes;
+    [[nodiscard]] const Biome& getBiome(const BiomeID id) const noexcept {
+        return biomes[static_cast<size_t>(id)];
     }
 
     BiomeRegistry(const BiomeRegistry&) = delete;
     BiomeRegistry& operator=(const BiomeRegistry&) = delete;
-    BiomeRegistry(BiomeRegistry&&) = delete;
-    BiomeRegistry& operator=(BiomeRegistry&&) = delete;
 
-    // Initialize standard biomes (called once at startup)
+    [[nodiscard]] OreFeature* getCoalOreFeature() const noexcept { return coalOre; }
+    [[nodiscard]] OreFeature* getIronOreFeature() const noexcept { return ironOre; }
+    [[nodiscard]] OreFeature* getGoldOreFeature() const noexcept { return goldOre; }
+    [[nodiscard]] OreFeature* getDiamondOreFeature() const noexcept { return diamondOre; }
+    [[nodiscard]] OreFeature* getEmeraldOreFeature() const noexcept { return emeraldOre; }
+    [[nodiscard]] LakeFeature* getWaterPocketFeature() const noexcept { return waterPocket; }
+    [[nodiscard]] LakeFeature* getLavaPocketFeature() const noexcept { return lavaPocket; }
+    [[nodiscard]] LakeFeature* getLavaLakeFeature() const noexcept { return lavaLake; }
+
+    /// Must run after Blocks::init(), since features capture block IDs.
     void init() {
-        if (initialized) [[unlikely]] return;
+        if (initialized) return;
         initialized = true;
+        using namespace Blocks;
 
-        // Pre-allocate all features upfront to avoid repeated allocations
-        initializeFeatures();
+        coalOre = make<OreFeature>(COAL_ORE, STONE, 5, 128, 12, 0.15f);
+        ironOre = make<OreFeature>(IRON_ORE, STONE, 5, 64, 8, 0.08f);
+        goldOre = make<OreFeature>(GOLD_ORE, STONE, 1, 32, 6, 0.02f);
+        diamondOre = make<OreFeature>(DIAMOND_ORE, STONE, 1, 15, 4, 0.005f);
+        emeraldOre = make<OreFeature>(EMERALD_ORE, STONE, 1, 48, 2, 0.002f);
+        waterPocket = make<LakeFeature>(WATER, STONE, 3, 0.002f);
+        lavaPocket = make<LakeFeature>(LAVA, STONE, 4, 0.0002f);
+        lavaLake = make<LakeFeature>(LAVA, STONE, 7, 0.00005f);
 
-        // Initialize biomes in-place (no copying)
-        initializePlains();
-        initializeDesert();
-        initializeForest();
-        initializeMountains();
-        initializeBeach();
-        initializeOcean();
+        auto plant = [&](uint8_t block, uint8_t soil, float chance, uint8_t top = 0) {
+            return make<VegetationFeature>(block, soil, chance, top);
+        };
+        auto meadow = [&](Biome& b, uint8_t soil, float flowerChance) {
+            for (uint8_t flower : {POPPY, DANDELION, CORNFLOWER, AZURE_BLUET, WHITE_TULIP, PINK_TULIP, ORANGE_TULIP})
+                b.features.push_back(plant(flower, soil, flowerChance));
+        };
+
+        define(BiomeID::OCEAN, "Ocean", GRAVEL, GRAVEL, GRAVEL);
+        define(BiomeID::DEEP_OCEAN, "Deep Ocean", GRAVEL, GRAVEL, GRAVEL);
+        define(BiomeID::FROZEN_OCEAN, "Frozen Ocean", GRAVEL, GRAVEL, GRAVEL).frozenWater = true;
+        define(BiomeID::WARM_OCEAN, "Warm Ocean", SAND, SAND, SAND);
+        define(BiomeID::RIVER, "River", SAND, SAND, SAND);
+        define(BiomeID::FROZEN_RIVER, "Frozen River", SAND, SAND, GRAVEL).frozenWater = true;
+
+        define(BiomeID::BEACH, "Beach", SAND, SAND, SAND, SANDSTONE).underDepth = 4;
+        define(BiomeID::SNOWY_BEACH, "Snowy Beach", SNOW, SAND, SAND, SANDSTONE).frozenWater = true;
+        define(BiomeID::STONY_SHORE, "Stony Shore", STONE, STONE, GRAVEL);
+
+        Biome& plains = define(BiomeID::PLAINS, "Plains", GRASS_BLOCK, DIRT, DIRT);
+        plains.features = {make<TreeFeature>(OAK_LOG, OAK_LEAVES, 4, 6, 2, 0.002f),
+                           plant(TALL_GRASS_BOTTOM, GRASS_BLOCK, 0.04f, TALL_GRASS_TOP)};
+        meadow(plains, GRASS_BLOCK, 0.012f);
+        plains.features.push_back(plant(GRASS, GRASS_BLOCK, 0.4f));
+
+        Biome& flowers = define(BiomeID::FLOWER_PLAINS, "Flower Plains", GRASS_BLOCK, DIRT, DIRT);
+        flowers.features = {make<BigTreeFeature>(OAK_LOG, OAK_LEAVES, 0.0015f)};
+        meadow(flowers, GRASS_BLOCK, 0.06f);
+        flowers.features.push_back(plant(GRASS, GRASS_BLOCK, 0.3f));
+
+        Biome& snowyPlains = define(BiomeID::SNOWY_PLAINS, "Snowy Plains", SNOWY_GRASS_BLOCK, DIRT, DIRT);
+        snowyPlains.frozenWater = true;
+        snowyPlains.features = {make<ConiferTreeFeature>(SPRUCE_LOG, SPRUCE_LEAVES, 6, 9, 0.003f)};
+
+        Biome& forest = define(BiomeID::FOREST, "Forest", GRASS_BLOCK, DIRT, DIRT);
+        forest.features = {make<LakeFeature>(WATER, GRASS_BLOCK, 4, 0.001f),
+                           make<BigTreeFeature>(OAK_LOG, OAK_LEAVES, 0.03f),
+                           make<TreeFeature>(BIRCH_LOG, BIRCH_LEAVES, 5, 7, 2, 0.02f),
+                           make<TreeFeature>(OAK_LOG, OAK_LEAVES, 5, 8, 3, 0.12f),
+                           plant(WHITE_TULIP, GRASS_BLOCK, 0.03f),
+                           plant(POPPY, GRASS_BLOCK, 0.03f),
+                           plant(GRASS, GRASS_BLOCK, 0.25f)};
+
+        Biome& birch = define(BiomeID::BIRCH_FOREST, "Birch Forest", GRASS_BLOCK, DIRT, DIRT);
+        birch.features = {make<TreeFeature>(BIRCH_LOG, BIRCH_LEAVES, 5, 8, 2, 0.1f)};
+        meadow(birch, GRASS_BLOCK, 0.01f);
+        birch.features.push_back(plant(GRASS, GRASS_BLOCK, 0.3f));
+
+        Biome& dark = define(BiomeID::DARK_FOREST, "Dark Forest", GRASS_BLOCK, DIRT, DIRT);
+        dark.features = {make<BigTreeFeature>(DARK_OAK_LOG, DARK_OAK_LEAVES, 0.06f),
+                         make<TreeFeature>(DARK_OAK_LOG, DARK_OAK_LEAVES, 4, 6, 3, 0.25f),
+                         plant(GRASS, GRASS_BLOCK, 0.2f)};
+
+        Biome& taiga = define(BiomeID::TAIGA, "Taiga", COLD_GRASS_BLOCK, DIRT, DIRT);
+        taiga.features = {make<ConiferTreeFeature>(SPRUCE_LOG, SPRUCE_LEAVES, 7, 12, 0.07f),
+                          plant(FERN, COLD_GRASS_BLOCK, 0.12f),
+                          plant(GRASS, COLD_GRASS_BLOCK, 0.15f)};
+
+        Biome& snowyTaiga = define(BiomeID::SNOWY_TAIGA, "Snowy Taiga", SNOWY_GRASS_BLOCK, DIRT, DIRT);
+        snowyTaiga.frozenWater = true;
+        snowyTaiga.features = {make<ConiferTreeFeature>(SPRUCE_LOG, SPRUCE_LEAVES, 7, 11, 0.05f)};
+
+        Biome& desert = define(BiomeID::DESERT, "Desert", SAND, SAND, SAND, SANDSTONE);
+        desert.underDepth = 5;
+        desert.features = {make<LakeFeature>(LAVA, SAND, 5, 0.0005f),
+                           make<CactusFeature>(0.006f),
+                           plant(DEAD_BUSH, SAND, 0.005f),
+                           plant(DRY_SHRUB, SAND, 0.004f)};
+
+        Biome& savanna = define(BiomeID::SAVANNA, "Savanna", DRY_GRASS_BLOCK, DIRT, DIRT);
+        savanna.features = {make<TreeFeature>(ACACIA_LOG, ACACIA_LEAVES, 4, 6, 3, 0.006f),
+                            plant(DRY_SHRUB, DRY_GRASS_BLOCK, 0.12f),
+                            plant(GRASS, DRY_GRASS_BLOCK, 0.25f)};
+
+        Biome& badlands = define(BiomeID::BADLANDS, "Badlands", RED_SAND, RED_SAND, RED_SAND, TERRACOTTA);
+        badlands.terracottaBands = true;
+        badlands.underDepth = 2;
+        badlands.features = {make<CactusFeature>(0.002f), plant(DEAD_BUSH, RED_SAND, 0.01f)};
+
+        Biome& swamp = define(BiomeID::SWAMP, "Swamp", SWAMP_GRASS_BLOCK, DIRT, DIRT);
+        swamp.features = {make<TreeFeature>(OAK_LOG, OAK_LEAVES, 5, 7, 3, 0.02f),
+                          plant(BLUE_ORCHID, SWAMP_GRASS_BLOCK, 0.03f),
+                          plant(GRASS, SWAMP_GRASS_BLOCK, 0.3f)};
+
+        Biome& jungle = define(BiomeID::JUNGLE, "Jungle", LUSH_GRASS_BLOCK, DIRT, DIRT);
+        jungle.features = {make<BigTreeFeature>(JUNGLE_LOG, JUNGLE_LEAVES, 0.04f),
+                           make<TreeFeature>(JUNGLE_LOG, JUNGLE_LEAVES, 4, 9, 3, 0.12f),
+                           plant(FERN, LUSH_GRASS_BLOCK, 0.15f),
+                           plant(TALL_GRASS_BOTTOM, LUSH_GRASS_BLOCK, 0.08f, TALL_GRASS_TOP),
+                           plant(GRASS, LUSH_GRASS_BLOCK, 0.35f)};
+
+        Biome& hills = define(BiomeID::WINDSWEPT_HILLS, "Windswept Hills", GRASS_BLOCK, DIRT, GRAVEL);
+        hills.features = {make<ConiferTreeFeature>(SPRUCE_LOG, SPRUCE_LEAVES, 6, 10, 0.01f),
+                          make<LakeFeature>(LAVA, STONE, 6, 0.001f),
+                          plant(GRASS, GRASS_BLOCK, 0.1f)};
+
+        define(BiomeID::SNOWY_PEAKS, "Snowy Peaks", SNOW, SNOW, PACKED_ICE).frozenWater = true;
+        define(BiomeID::STONY_PEAKS, "Stony Peaks", STONE, STONE, GRAVEL);
     }
-
-    // Universal ore feature getters
-    [[nodiscard]] OreFeature* getCoalOreFeature() const noexcept { return coalOreFeature.get(); }
-    [[nodiscard]] OreFeature* getIronOreFeature() const noexcept { return ironOreFeature.get(); }
-    [[nodiscard]] OreFeature* getGoldOreFeature() const noexcept { return goldOreFeature.get(); }
-    [[nodiscard]] OreFeature* getDiamondOreFeature() const noexcept { return diamondOreFeature.get(); }
-    [[nodiscard]] OreFeature* getEmeraldOreFeature() const noexcept { return emeraldOreFeature.get(); }
-    [[nodiscard]] LakeFeature* getWaterPocketFeature() const noexcept { return waterPocketFeature.get(); }
-    [[nodiscard]] LakeFeature* getLavaPocketFeature() const noexcept { return lavaPocketFeature.get(); }
-    [[nodiscard]] LakeFeature* getLavaLakeFeature() const noexcept { return lavaLakeFeature.get(); }
 
 private:
-    BiomeRegistry() noexcept : initialized(false), biomes{} {}
+    BiomeRegistry() = default;
 
-    bool initialized;
+    bool initialized = false;
+    std::array<Biome, static_cast<size_t>(BiomeID::COUNT)> biomes{};
+    std::vector<std::unique_ptr<Feature>> ownedFeatures;
 
-    // Use an array to store biomes for better reliability.
-    std::array<Biome, BIOME_COUNT> biomes;
+    OreFeature *coalOre = nullptr, *ironOre = nullptr, *goldOre = nullptr, *diamondOre = nullptr, *emeraldOre = nullptr;
+    LakeFeature *waterPocket = nullptr, *lavaPocket = nullptr, *lavaLake = nullptr;
 
-    // Feature storage - grouped by type for better cache locality
-    std::unique_ptr<TreeFeature> plainsTreeFeature;
-    std::unique_ptr<VegetationFeature> plainsGrassFeature;
-    std::unique_ptr<VegetationFeature> plainsPoppyFeature;
-    std::unique_ptr<VegetationFeature> plainsWhiteTulipFeature;
-    std::unique_ptr<VegetationFeature> plainsPinkTulipFeature;
-    std::unique_ptr<VegetationFeature> plainsOrangeTulipFeature;
-
-    std::unique_ptr<TreeFeature> forestTreeFeature;
-    std::unique_ptr<BigTreeFeature> bigTreeFeature;
-    std::unique_ptr<VegetationFeature> forestGrassFeature;
-    std::unique_ptr<LakeFeature> forestPondFeature;
-    std::unique_ptr<VegetationFeature> forestWhiteTulipFeature;
-    std::unique_ptr<VegetationFeature> forestPoppyFeature;
-
-    std::unique_ptr<LakeFeature> desertLavaPool;
-    std::unique_ptr<LakeFeature> mountainsLavaPool;
-
-    std::unique_ptr<OreFeature> coalOreFeature;
-    std::unique_ptr<OreFeature> ironOreFeature;
-    std::unique_ptr<OreFeature> goldOreFeature;
-    std::unique_ptr<OreFeature> diamondOreFeature;
-    std::unique_ptr<OreFeature> emeraldOreFeature;
-
-    std::unique_ptr<LakeFeature> waterPocketFeature;
-    std::unique_ptr<LakeFeature> lavaPocketFeature;
-    std::unique_ptr<LakeFeature> lavaLakeFeature;
-
-    // Helper to set biome name efficiently (avoids strncpy_s overhead)
-    static inline void setBiomeName(char* dest, const char* src) noexcept {
-        size_t i = 0;
-        while (i < 31 && src[i] != '\0') {
-            dest[i] = src[i];
-            ++i;
-        }
-        dest[i] = '\0';
+    template<class T, class... Args>
+    T* make(Args&&... args) {
+        auto owned = std::make_unique<T>(std::forward<Args>(args)...);
+        T* raw = owned.get();
+        ownedFeatures.push_back(std::move(owned));
+        return raw;
     }
 
-    // Initialize all features (called once)
-    void initializeFeatures() {
-        // Universal ore features
-        coalOreFeature = std::make_unique<OreFeature>(Blocks::COAL_ORE, Blocks::STONE, 5, 128, 12, 0.15f);
-        ironOreFeature = std::make_unique<OreFeature>(Blocks::IRON_ORE, Blocks::STONE, 5, 64, 8, 0.08f);
-        goldOreFeature = std::make_unique<OreFeature>(Blocks::GOLD_ORE, Blocks::STONE, 1, 32, 6, 0.02f);
-        diamondOreFeature = std::make_unique<OreFeature>(Blocks::DIAMOND_ORE, Blocks::STONE, 1, 15, 4, 0.005f);
-        emeraldOreFeature = std::make_unique<OreFeature>(Blocks::EMERALD_ORE, Blocks::STONE, 1, 48, 2, 0.002f);
-
-        waterPocketFeature = std::make_unique<LakeFeature>(Blocks::WATER, Blocks::STONE, 3, 0.002f);
-        lavaPocketFeature = std::make_unique<LakeFeature>(Blocks::LAVA, Blocks::STONE, 4, 0.0002f);
-        lavaLakeFeature = std::make_unique<LakeFeature>(Blocks::LAVA, Blocks::STONE, 7, 0.00005f);
-
-        // Plains features
-        plainsTreeFeature = std::make_unique<TreeFeature>(Blocks::OAK_LOG, Blocks::OAK_LEAVES, 4, 6, 2, 0.005f);
-        plainsGrassFeature = std::make_unique<VegetationFeature>(Blocks::GRASS, Blocks::GRASS_BLOCK, 0.5f);
-        plainsPoppyFeature = std::make_unique<VegetationFeature>(Blocks::POPPY, Blocks::GRASS_BLOCK, 0.08f);
-        plainsWhiteTulipFeature = std::make_unique<VegetationFeature>(Blocks::WHITE_TULIP, Blocks::GRASS_BLOCK, 0.04f);
-        plainsPinkTulipFeature = std::make_unique<VegetationFeature>(Blocks::PINK_TULIP, Blocks::GRASS_BLOCK, 0.04f);
-        plainsOrangeTulipFeature = std::make_unique<VegetationFeature>(Blocks::ORANGE_TULIP, Blocks::GRASS_BLOCK, 0.04f);
-
-        // Forest features
-        forestTreeFeature = std::make_unique<TreeFeature>(Blocks::OAK_LOG, Blocks::OAK_LEAVES, 5, 8, 3, 0.15f);
-        bigTreeFeature = std::make_unique<BigTreeFeature>(Blocks::OAK_LOG, Blocks::OAK_LEAVES, 0.05f);
-        forestGrassFeature = std::make_unique<VegetationFeature>(Blocks::GRASS, Blocks::GRASS_BLOCK, 0.25f);
-        forestPondFeature = std::make_unique<LakeFeature>(Blocks::WATER, Blocks::GRASS_BLOCK, 4, 0.001f);
-        forestWhiteTulipFeature = std::make_unique<VegetationFeature>(Blocks::WHITE_TULIP, Blocks::GRASS_BLOCK, 0.08f);
-        forestPoppyFeature = std::make_unique<VegetationFeature>(Blocks::POPPY, Blocks::GRASS_BLOCK, 0.06f);
-
-        // Desert features
-        desertLavaPool = std::make_unique<LakeFeature>(Blocks::LAVA, Blocks::SAND, 5, 0.002f);
-
-        // Mountain features
-        mountainsLavaPool = std::make_unique<LakeFeature>(Blocks::LAVA, Blocks::STONE, 6, 0.003f);
-    }
-
-    void initializePlains() {
-        Biome& plains = biomes[PLAINS];
-        plains.id = PLAINS;
-        setBiomeName(plains.name, "Plains");
-        plains.surfaceBlock = Blocks::GRASS_BLOCK;
-        plains.underBlock = Blocks::DIRT;
-        plains.deepBlock = Blocks::STONE;
-        plains.baseHeight = 66.0f;
-        plains.heightMultiplier = 0.6f;
-        plains.minTemperature = 0.3f;
-        plains.maxTemperature = 0.7f;
-        plains.minHumidity = 0.3f;
-        plains.maxHumidity = 0.7f;
-
-        // Reserve capacity to avoid reallocation
-        plains.features.reserve(6);
-        plains.features.push_back(plainsPoppyFeature.get());
-        plains.features.push_back(plainsWhiteTulipFeature.get());
-        plains.features.push_back(plainsPinkTulipFeature.get());
-        plains.features.push_back(plainsOrangeTulipFeature.get());
-        plains.features.push_back(plainsTreeFeature.get());
-        plains.features.push_back(plainsGrassFeature.get());
-    }
-
-    void initializeDesert() {
-        Biome& desert = biomes[DESERT];
-        desert.id = DESERT;
-        setBiomeName(desert.name, "Desert");
-        desert.surfaceBlock = Blocks::SAND;
-        desert.underBlock = Blocks::SAND;
-        desert.deepBlock = Blocks::STONE;
-        desert.baseHeight = 65.0f;
-        desert.heightMultiplier = 0.4f;
-        desert.minTemperature = 0.8f;
-        desert.maxTemperature = 1.0f;
-        desert.minHumidity = 0.0f;
-        desert.maxHumidity = 0.2f;
-
-        desert.features.reserve(1);
-        desert.features.push_back(desertLavaPool.get());
-    }
-
-    void initializeForest() {
-        Biome& forest = biomes[FOREST];
-        forest.id = FOREST;
-        setBiomeName(forest.name, "Forest");
-        forest.surfaceBlock = Blocks::GRASS_BLOCK;
-        forest.underBlock = Blocks::DIRT;
-        forest.deepBlock = Blocks::STONE;
-        forest.baseHeight = 68.0f;
-        forest.heightMultiplier = 1.2f;
-        forest.minTemperature = 0.4f;
-        forest.maxTemperature = 0.8f;
-        forest.minHumidity = 0.6f;
-        forest.maxHumidity = 1.0f;
-
-        // Rare/Complex items FIRST so they aren't blocked by Grass/Small Trees
-        forest.features.reserve(6);
-        forest.features.push_back(forestPondFeature.get());
-        forest.features.push_back(bigTreeFeature.get());
-        forest.features.push_back(forestWhiteTulipFeature.get());
-        forest.features.push_back(forestPoppyFeature.get());
-        forest.features.push_back(forestTreeFeature.get());
-        forest.features.push_back(forestGrassFeature.get());
-    }
-
-    void initializeMountains() {
-        Biome& mountains = biomes[MOUNTAINS];
-        mountains.id = MOUNTAINS;
-        setBiomeName(mountains.name, "Mountains");
-        mountains.surfaceBlock = Blocks::STONE;
-        mountains.underBlock = Blocks::STONE;
-        mountains.deepBlock = Blocks::STONE;
-        mountains.baseHeight = 70.0f;
-        mountains.heightMultiplier = 3.5f;
-        mountains.minTemperature = 0.0f;
-        mountains.maxTemperature = 0.3f;
-        mountains.minHumidity = 0.0f;
-        mountains.maxHumidity = 1.0f;
-
-        mountains.features.reserve(1);
-        mountains.features.push_back(mountainsLavaPool.get());
-    }
-
-    void initializeBeach() {
-        Biome& beach = biomes[BEACH];
-        beach.id = BEACH;
-        setBiomeName(beach.name, "Beach");
-        beach.surfaceBlock = Blocks::SAND;
-        beach.underBlock = Blocks::SAND;
-        beach.deepBlock = Blocks::STONE;
-        beach.baseHeight = 63.0f;
-        beach.heightMultiplier = 0.1f;
-        beach.minTemperature = 0.6f;
-        beach.maxTemperature = 0.8f;
-        beach.minHumidity = 0.2f;
-        beach.maxHumidity = 0.5f;
-        // No features - reserve(0) not needed
-    }
-
-    void initializeOcean() {
-        Biome& ocean = biomes[OCEAN];
-        ocean.id = OCEAN;
-        setBiomeName(ocean.name, "Ocean");
-        ocean.surfaceBlock = Blocks::GRAVEL;
-        ocean.underBlock = Blocks::SAND;
-        ocean.deepBlock = Blocks::STONE;
-        ocean.baseHeight = 45.0f;
-        ocean.heightMultiplier = 0.5f;
-        // No temperature/humidity ranges for ocean
-        // No features - reserve(0) not needed
+    Biome& define(const BiomeID id, const char* name, const uint8_t surface, const uint8_t under,
+                  const uint8_t underwater, const uint8_t steep = Blocks::STONE) {
+        Biome& b = biomes[static_cast<size_t>(id)];
+        b.id = id;
+        snprintf(b.name, sizeof(b.name), "%s", name);
+        b.surfaceBlock = surface;
+        b.underBlock = under;
+        b.underwaterBlock = underwater;
+        b.steepBlock = steep;
+        return b;
     }
 };

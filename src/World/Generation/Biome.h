@@ -4,43 +4,30 @@
  */
 #pragma once
 
-#include <string>
 #include <vector>
 #include <cstdint>
 #include "Feature.h"
+#include "BiomeID.h"
 
 /**
  * @struct Biome
- * @brief Stores information about how a specific biome (like a Forest) should look.
+ * @brief How a biome dresses the terrain: surface blocks and decorations.
+ *
+ * Terrain height is not a biome property (see Terrain.h), which is what keeps
+ * biome borders from turning into cliffs.
  */
 struct Biome {
-    // Identification
-    uint8_t id;
-    char name[32];
+    BiomeID id = BiomeID::PLAINS;
+    char name[32] = {};
 
-    // Block Configuration
-    uint8_t surfaceBlock;    // Top layer (Grass, Sand)
-    uint8_t underBlock;      // Sub-surface (Dirt, Sand)
-    uint8_t deepBlock;       // Deep underground (Stone)
+    uint8_t surfaceBlock = 0;    ///< Top block above the water line (Grass, Sand).
+    uint8_t underBlock = 0;      ///< The few blocks below the surface (Dirt, Sand).
+    uint8_t underwaterBlock = 0; ///< Top block of columns below the water line.
+    uint8_t steepBlock = 0;      ///< Replaces the surface on steep slopes (usually Stone).
+    int underDepth = 3;
+    bool frozenWater = false;    ///< Water surface freezes to ice.
+    bool terracottaBands = false;///< Badlands: layered terracotta instead of stone near the surface.
 
-    // Terrain Shaping
-    float baseHeight;        // Base terrain height offset
-    float heightMultiplier;  // Amplifies/flattens noise (1.0 = normal)
-    
-    // Climate (for lookup)
-    float minTemperature;
-    float maxTemperature;
-    float minHumidity;
-    float maxHumidity;
-
-    // Features/Decorations (stored as raw pointers, Registry owns lifetime)
+    /// Placement order matters: big features first so small plants don't block them.
     std::vector<Feature*> features;
-
-    Biome() 
-        : id(0), surfaceBlock(0), underBlock(0), deepBlock(0),
-          baseHeight(64.0f), heightMultiplier(1.0f),
-          minTemperature(0.0f), maxTemperature(1.0f),
-          minHumidity(0.0f), maxHumidity(1.0f) {
-        name[0] = '\0';
-    }
 };
