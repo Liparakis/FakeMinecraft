@@ -21,7 +21,7 @@ namespace {
         }
     }
 
-    enum class VertexLayout : uint8_t { None, Chunk, Fluid, ChunkPosition, Billboard, BillboardPosition, PosUV, Pos, Model, UI };
+    enum class VertexLayout : uint8_t { None, Chunk, Fluid, ChunkPosition, Billboard, BillboardPosition, PosUV, Pos, Model, UI, Lod };
     enum class Blend : uint8_t { None, Alpha, Additive };
 
     struct PipelineSpec {
@@ -51,6 +51,7 @@ namespace {
             case PipelineId::ShadowWorld: return {"shadow_world.vert", nullptr, VertexLayout::ChunkPosition, TRI, VK_CULL_MODE_NONE, true, true, VK_COMPARE_OP_LESS, Blend::None, true};
             case PipelineId::ShadowBillboard: return {"shadow_billboard.vert", nullptr, VertexLayout::BillboardPosition, TRI, VK_CULL_MODE_NONE, true, true, VK_COMPARE_OP_LESS, Blend::None, true};
             case PipelineId::UI: return {"ui.vert", "ui.frag", VertexLayout::UI, TRI, VK_CULL_MODE_NONE, false, false, GE, Blend::Alpha, false};
+            case PipelineId::Lod: return {"lod.vert", "lod.frag", VertexLayout::Lod, TRI, VK_CULL_MODE_NONE, true, true, GE, Blend::None, false};
         }
         throw std::runtime_error("[Renderer] unknown pipeline");
     }
@@ -93,6 +94,9 @@ namespace {
                 return {{0, 20, VK_VERTEX_INPUT_RATE_VERTEX},
                         {attr(0, VK_FORMAT_R32G32_SFLOAT, 0), attr(1, VK_FORMAT_R32G32_SFLOAT, 8),
                          attr(2, VK_FORMAT_R8G8B8A8_UNORM, 16)}};
+            case VertexLayout::Lod:
+                return {{0, 16, VK_VERTEX_INPUT_RATE_VERTEX},
+                        {attr(0, VK_FORMAT_R32G32B32_SFLOAT, 0), attr(1, VK_FORMAT_R8G8B8A8_UINT, 12)}};
             case VertexLayout::None:
                 break;
         }
@@ -186,6 +190,19 @@ void Renderer::init(SDL_Window *sdlWindow, const bool useVsync) {
                                         VK_IMAGE_ASPECT_COLOR_BIT);
     reflectionDepth = ctx().createImage({REFLECTION_SIZE, REFLECTION_SIZE}, DEPTH_FORMAT,
                                         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+    chunkMask = ctx().createImage({CHUNK_MASK_SIZE, CHUNK_MASK_SIZE}, VK_FORMAT_R8_UNORM,
+                                  VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+    ctx().immediateSubmit([&](VkCommandBuffer cmd) {
+        imageBarrier(cmd, chunkMask.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        const VkClearColorValue zero{};
+        const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdClearColorImage(cmd, chunkMask.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
+        imageBarrier(cmd, chunkMask.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    });
+
     // Both are sampled every frame even when their pass is skipped, so they start out readable.
     transitionNow(shadowMap, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     transitionNow(reflectionColor, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -234,14 +251,15 @@ void Renderer::destroyTargets() {
 void Renderer::createDescriptors() {
     const VkDevice device = ctx().device;
 
-    VkDescriptorSetLayoutBinding frameBindings[4] = {
+    VkDescriptorSetLayoutBinding frameBindings[5] = {
         {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
     };
     VkDescriptorSetLayoutCreateInfo frameInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    frameInfo.bindingCount = 4;
+    frameInfo.bindingCount = 5;
     frameInfo.pBindings = frameBindings;
     check(vkCreateDescriptorSetLayout(device, &frameInfo, nullptr, &frameSetLayout), "vkCreateDescriptorSetLayout");
 
@@ -254,7 +272,7 @@ void Renderer::createDescriptors() {
     constexpr uint32_t MAX_TEXTURES = 32;
     VkDescriptorPoolSize sizes[2] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2 * VkContext::FRAMES_IN_FLIGHT},
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * VkContext::FRAMES_IN_FLIGHT * 3 + MAX_TEXTURES},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * VkContext::FRAMES_IN_FLIGHT * 4 + MAX_TEXTURES},
     };
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.maxSets = 2 * VkContext::FRAMES_IN_FLIGHT + MAX_TEXTURES;
@@ -294,9 +312,11 @@ void Renderer::writeFrameSets() {
             const VkDescriptorImageInfo reflected{linearClamp, reflection ? textures[whiteTexture].view : reflectionColor.view,
                                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 
+            const VkDescriptorImageInfo mask{nearestClamp, chunkMask.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+
             const VkDescriptorSet set = reflection ? frame.reflectionSet : frame.mainSet;
-            VkWriteDescriptorSet writes[4]{};
-            for (uint32_t i = 0; i < 4; ++i) {
+            VkWriteDescriptorSet writes[5]{};
+            for (uint32_t i = 0; i < 5; ++i) {
                 writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 writes[i].dstSet = set;
                 writes[i].dstBinding = i;
@@ -307,7 +327,8 @@ void Renderer::writeFrameSets() {
             writes[1].pImageInfo = &blocks;
             writes[2].pImageInfo = &shadow;
             writes[3].pImageInfo = &reflected;
-            vkUpdateDescriptorSets(ctx().device, 4, writes, 0, nullptr);
+            writes[4].pImageInfo = &mask;
+            vkUpdateDescriptorSets(ctx().device, 5, writes, 0, nullptr);
         }
     }
 }
@@ -335,6 +356,7 @@ void Renderer::shutdown() {
     ctx().destroyImage(shadowMap);
     ctx().destroyImage(reflectionColor);
     ctx().destroyImage(reflectionDepth);
+    ctx().destroyImage(chunkMask);
 
     if (profiler.pool) vkDestroyQueryPool(device, profiler.pool, nullptr);
     vkDestroySampler(device, blockSampler, nullptr);
@@ -395,6 +417,29 @@ void Renderer::copyToBuffer(const GpuBuffer &dst, const void *data, const size_t
     vkCmdCopyBuffer(ctx().cmd(), source.buffer, dst.buffer, 1, &region);
     frame.uploadsPending = true;
     if (source.buffer != frame.staging.buffer) ctx().destroyLater(source);
+}
+
+void Renderer::uploadChunkMask(const uint8_t *mask) {
+    constexpr size_t BYTES = CHUNK_MASK_SIZE * CHUNK_MASK_SIZE;
+    FrameResources &frame = frames[ctx().currentFrame()];
+    const size_t offset = (frame.stagingUsed + 15) & ~static_cast<size_t>(15);
+    if (offset + BYTES > STAGING_BYTES) return; // Retried next frame; the mask only changes as chunks stream.
+    frame.stagingUsed = offset + BYTES;
+    std::memcpy(static_cast<uint8_t *>(frame.staging.mapped) + offset, mask, BYTES);
+    frame.uploadsPending = true;
+
+    const VkCommandBuffer cmd = ctx().cmd();
+    imageBarrier(cmd, chunkMask.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkBufferImageCopy copy{};
+    copy.bufferOffset = offset;
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {CHUNK_MASK_SIZE, CHUNK_MASK_SIZE, 1};
+    vkCmdCopyBufferToImage(cmd, frame.staging.buffer, chunkMask.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    imageBarrier(cmd, chunkMask.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 }
 
 void Renderer::finishUploads() {

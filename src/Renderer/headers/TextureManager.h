@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <array>
 #include <cstdint>
 
 /**
@@ -44,7 +45,15 @@ public:
      */
     uint16_t getLayerIndex(const std::string& textureName) const;
 
+    /// Average colour of a texture layer (after tinting), ignoring transparent texels.
+    /// Distant terrain uses it in place of the full texture.
+    [[nodiscard]] std::array<uint8_t, 3> averageColor(uint16_t layer) const {
+        return layer < layerColors.size() ? layerColors[layer] : std::array<uint8_t, 3>{255, 0, 255};
+    }
+
 private:
+    /// Average RGB per texture layer, filled by loadTextures.
+    std::vector<std::array<uint8_t, 3>> layerColors;
     TextureManager() = default;
     ~TextureManager();
 

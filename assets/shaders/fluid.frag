@@ -54,8 +54,8 @@ void main() {
 
     vec3 waterColor = totalLight * texResult.rgb;
     if (texResult.a > 0.5 && fresnel > 0.01) {
-        FragColor = vec4(mix(waterColor, reflectionColor, fresnel), texResult.a);
+        FragColor = vec4(applyFog(mix(waterColor, reflectionColor, fresnel), FragPos), texResult.a);
     } else {
-        FragColor = vec4(waterColor, texResult.a);
+        FragColor = vec4(applyFog(waterColor, FragPos), texResult.a);
     }
 }

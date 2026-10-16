@@ -13,6 +13,7 @@
 #include "TypeBox.h"
 #include "Button.h"
 #include "Sky.h"
+#include "../../World/Lod/LodTerrain.h"
 
 // Forward declarations
 class Chunk;
@@ -189,6 +190,8 @@ private:
 
     /// @brief Manages the day/night cycle and atmospheric rendering.
     Sky sky;
+    /// Blocky distant terrain beyond the real chunks, out to ~16 km.
+    LodTerrain lodTerrain;
 
     /** @name UI Components @{ */
     Checkbox fullscreenCheckBox;
@@ -207,6 +210,7 @@ private:
     Checkbox dynamicShadowsBox;
     Checkbox msaaBox;
     Checkbox fancyLeavesBox;
+    Checkbox distantTerrainBox;
 
     bool dynamicShadowsEnabled = true;
     bool msaaEnabled = true;

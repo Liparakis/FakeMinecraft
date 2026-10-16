@@ -384,6 +384,20 @@ void TextureManager::loadTextures(const std::string& directoryPath) {
     }
 
     // 4. Upload to the GPU (mipmaps are generated there).
+    layerColors.assign(layerCount, {0, 0, 0});
+    for (size_t layer = 0; layer < layerCount; ++layer) {
+        const unsigned char *texels = textureArrayBuffer.data() + layer * layerSize;
+        uint64_t sum[3] = {}, weight = 0;
+        for (size_t i = 0; i < layerSize; i += 4) {
+            const uint32_t a = texels[i + 3];
+            for (int c = 0; c < 3; ++c) sum[c] += static_cast<uint64_t>(texels[i + c]) * a;
+            weight += a;
+        }
+        if (weight > 0) {
+            for (int c = 0; c < 3; ++c) layerColors[layer][c] = static_cast<uint8_t>(sum[c] / weight);
+        }
+    }
+
     Renderer::get().setTextureArray(static_cast<uint32_t>(arrayWidth), static_cast<uint32_t>(arrayHeight),
                                     static_cast<uint32_t>(layerCount), textureArrayBuffer.data());
 

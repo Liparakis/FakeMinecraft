@@ -139,3 +139,41 @@ Not pursued: culling faces next to enclosed caves for distant chunks removed onl
 (~3.7 M opaque triangles per frame; quarter resolution barely changes it), so the
 next levers are per-direction face culling with indirect draws, or downsampled
 meshes for distant chunks.
+
+## Distant terrain (2026-10-16)
+
+Real (block) chunks now cover a radius of 16 chunks around the player (512
+blocks). Beyond them, `src/World/Lod/LodTerrain` draws blocky heightfield tiles
+out to 16,448 blocks, the distance Minecraft reaches at render distance 1028.
+
+- **Tiles.** A quadtree of 32x32-sample tiles. Level 0 samples every 4 blocks,
+  and each level doubles that up to level 8 (every 1,024 blocks). A tile splits
+  while the camera is closer than 4x its size, so a cell spans ~5 px on screen at
+  any distance. At 1.5x (~13 px steps) mountains read as giant cubes. Two worker threads build tiles
+  nearest-first straight from the terrain function: height, biome, water and a
+  raised canopy for forests. No block data exists for them. While a tile builds,
+  its nearest built ancestor (or built children) draws in its place.
+- **Colours.** Each biome's surface and canopy colours are the average colours
+  of its block textures (`TextureManager::averageColor`). Canopies are darkened
+  to 75% for the shadowed gaps between real leaves. Step walls keep the top
+  colour, and only cliffs show rock, so hills don't stripe with dirt. Each cell
+  gets ±7% brightness noise in place of texture detail.
+- **Seam with real chunks.** `Planet` writes a 128x128 mask of which chunks are
+  drawn (chunk coordinate mod 128), and `lod.frag` discards fragments over them.
+  LOD tiles are skipped only when they lie fully inside the real-chunk circle,
+  less one chunk of margin, so the two never leave a gap. Tile edges carry
+  skirts so neighbouring levels don't show cracks.
+- **Fog.** Every world shader fades to the sky colour by horizontal distance,
+  from 8% of the view distance (~1.3 km) to its end, as haze. The far plane sits at 1.5x the view
+  distance. With "Distant Terrain" off (Video Settings), the fog ends at the
+  real-chunk radius instead.
+- **Not drawn far away:** trees as individual blocks, caves, structures and
+  player edits.
+
+Cost (4x MSAA, 1280x720, uncapped, `FAKEMC_PROFILE=1`), 260 blocks up looking
+at the horizon: the distant pass takes 0.48 ms of a 1.45 ms GPU frame, and the
+CPU frame is 1.66 ms (~600 FPS). The previous commit, with 30 real chunks and
+~960 blocks visible, ran this view at ~387 FPS. The gain comes from drawing
+fewer real chunks. A/B runs alternating both builds put the LOD build at
+1.3-2x the previous commit across spawn and this view (the machine was noisy). `FAKEMC_RENDER_DISTANCE=N` sets the
+real-chunk radius for tests.

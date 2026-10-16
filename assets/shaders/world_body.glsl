@@ -47,5 +47,5 @@ void main() {
     if (texResult.a == 0.0)
         discard;
 #endif
-    FragColor = vec4(texResult.rgb * totalLight, 1.0);
+    FragColor = vec4(applyFog(texResult.rgb * totalLight, FragPos), 1.0);
 }

@@ -146,6 +146,7 @@ void Planet::prepare(const glm::vec3 &cameraPos) {
     }
 
     int chunksUploadedThisFrame = 0;
+    chunkMaskNext.fill(0);
     int readyChunks = 0, readyNear = 0;
 
     // Cache commonly used values to avoid recomputation in loops.
@@ -172,6 +173,12 @@ void Planet::prepare(const glm::vec3 &cameraPos) {
             toDeleteList.push_back(pos);
             continue;
         }
+        // Real chunks are drawn out to a horizontal radius; the mask tells distant terrain exactly which ones,
+        // so it fills the square's corners and never leaves a gap (or overlaps) at the seam.
+        const float horizontalDx = chunk->cullingCenter.x - camPosX;
+        const float horizontalDz = chunk->cullingCenter.z - camPosZ;
+        const bool withinRadius = horizontalDx * horizontalDx + horizontalDz * horizontalDz <= maxDistSq;
+        if (chunk->hasMesh() && withinRadius) chunkMaskNext[(pos.z & (MASK - 1)) * MASK + (pos.x & (MASK - 1))] = 1;
 
         if (chunk->ready) {
             ++readyChunks;
@@ -197,7 +204,7 @@ void Planet::prepare(const glm::vec3 &cameraPos) {
 
             const float distSq = dx*dx + dy*dy + dz*dz;
 
-            if (UNLIKELY(distSq > maxDistSq)) continue;
+            if (UNLIKELY(!withinRadius)) continue;
 
             chunk->cachedDistSq = distSq;
             frustumVisibleChunks.push_back(chunk);
@@ -218,6 +225,10 @@ void Planet::prepare(const glm::vec3 &cameraPos) {
     }
 
     reportLoadProgress(readyNear, readyChunks);
+    if (chunkMaskNext != chunkMask) {
+        chunkMask = chunkMaskNext;
+        chunkMaskChanged = true;
+    }
 
     // We need to sort these lists so that depth testing and blending works right.
     const bool cameraMoved = (newCamChunkX != prevSortCamX) || (newCamChunkZ != prevSortCamZ);

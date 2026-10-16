@@ -148,6 +148,8 @@ void GameObject::init() {
         msaaEnabled = false;
         msaaBox.setChecked(false);
     }
+    // FAKEMC_RENDER_DISTANCE overrides the starting real-chunk render distance.
+    if (const char *distance = std::getenv("FAKEMC_RENDER_DISTANCE")) Planet::planet->renderDistance = std::atoi(distance);
     // FAKEMC_FPS_CAP overrides the starting FPS setting (55 = VSync, above 360 = uncapped).
     if (const char *cap = std::getenv("FAKEMC_FPS_CAP")) fpsCap = std::atoi(cap);
     if (!screenshotPath) {
@@ -203,6 +205,7 @@ void GameObject::initializeGraphics() {
     Blocks::init();
     BiomeRegistry::getInstance().init();
     sky.init();
+    lodTerrain.init();
 }
 
 void GameObject::shutdown() {
@@ -211,6 +214,7 @@ void GameObject::shutdown() {
 
     Renderer &renderer = Renderer::get();
     renderer.releaseMesh(playerModel);
+    lodTerrain.shutdown();
     VkContext::get().destroyLater(outlineVertices);
     sky.shutdown();
     renderer.shutdown();
@@ -224,7 +228,7 @@ void GameObject::initializeUIElements() {
     fullscreenCheckBox = Checkbox(cachedWindowCenter.x, cachedWindowCenter.y - 100.0f, 50);
     fpsSlider = Slider(cachedWindowCenter.x - 100, cachedWindowCenter.y, 200.0f, 20.0f, 55.0f, 361.0f, 144.0f);
     renderDistanceSlider = Slider(cachedWindowCenter.x - 100, cachedWindowCenter.y - 80.0f, 200.0f, 20.0f, 4.0f, 30.f,
-                                  30.f);
+                                  16.f);
     seedBox = TypeBox(cachedWindowCenter.x - 100, cachedWindowCenter.y + 65.0f, 200.0f, 20.0f);
     uncapSpeedBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 110.0f, 30);
     superJumpBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 150.0f, 30);
@@ -237,6 +241,8 @@ void GameObject::initializeUIElements() {
     dynamicShadowsBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y - 20, 30);
     msaaBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 40, 30);
     fancyLeavesBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 100, 30);
+    distantTerrainBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 160, 30);
+    distantTerrainBox.setChecked(true);
     dynamicShadowsBox.setChecked(true);
     msaaBox.setChecked(true);
 }
@@ -271,6 +277,7 @@ void GameObject::onResize() {
     dynamicShadowsBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y - 20);
     msaaBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 40);
     fancyLeavesBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 100);
+    distantTerrainBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 160);
 
     cachedMatrices.dirty = true;
     Renderer::get().onResize();
@@ -333,7 +340,9 @@ void GameObject::renderFrame() {
     if (cachedMatrices.dirty) [[unlikely]] {
         cachedMatrices.view = camera.getViewMatrix();
         // Reverse-Z: near and far are swapped so depth precision is spent close to the camera.
-        cachedMatrices.projection = glm::perspective(glm::radians(90.0f), windowX / windowY, 10000.0f, 0.1f);
+        // The far distance (first argument) covers the distant terrain's ~16 km horizon.
+        cachedMatrices.projection = glm::perspective(glm::radians(90.0f), windowX / windowY,
+                                                     LodTerrain::VIEW_DISTANCE * 1.5f, 0.1f);
         cachedMatrices.dirty = false;
     }
     const glm::mat4 &view = cachedMatrices.view;
@@ -354,6 +363,12 @@ void GameObject::renderFrame() {
     mainUniforms.ambientStrength = sky.getAmbientStrength();
     mainUniforms.time = static_cast<float>(SDL_GetTicks()) * 0.001f;
     mainUniforms.simpleLighting = simpleLightingEnabled ? 1 : 0;
+    // Fog hides the edge of whatever is drawn: the horizon, or the last real chunks without distant terrain.
+    const float viewEnd = lodTerrain.enabled() ? LodTerrain::VIEW_DISTANCE
+                                               : static_cast<float>(Planet::planet->renderDistance * CHUNK_WIDTH);
+    mainUniforms.fogColor = glm::vec4(sky.getSkyColor(), 1.0f);
+    // Over 16 km the haze starts early, like real air; the short real-chunk range only hides its edge.
+    mainUniforms.fogRange = glm::vec4(viewEnd * (lodTerrain.enabled() ? 0.08f : 0.55f), viewEnd, 0.0f, 0.0f);
 
     FrameUniforms reflectionUniforms = mainUniforms;
     reflectionUniforms.view = reflection.view;
@@ -364,6 +379,12 @@ void GameObject::renderFrame() {
     // Chunk uploads are recorded here, before any pass begins.
     const Uint64 prepareStart = SDL_GetPerformanceCounter();
     Planet::planet->prepare(freecamActive ? savedPlayerPosition : camera.Position);
+    if (const uint8_t *mask = Planet::planet->takeChunkMaskIfChanged()) renderer.uploadChunkMask(mask);
+    {
+        const glm::vec3 &center = freecamActive ? savedPlayerPosition : camera.Position;
+        const float nearRadius = static_cast<float>(Planet::planet->renderDistance * CHUNK_WIDTH);
+        lodTerrain.update(camera.Position, glm::vec2(center.x, center.z), nearRadius, SEED);
+    }
     renderer.finishUploads();
     renderer.mark("uploads");
     const Uint64 recordStart = SDL_GetPerformanceCounter();
@@ -391,6 +412,12 @@ void GameObject::renderFrame() {
     renderer.beginMainPass(sky.getSkyColor());
     sky.render(view, camera.Position);
     Planet::planet->render();
+    {
+        Frustum frustum;
+        frustum.update(projection * view);
+        lodTerrain.render(frustum);
+        renderer.mark("main: distant");
+    }
     renderBlockOutline();
     if (freecamActive) [[unlikely]] renderPlayerModel();
     renderer.endPass();
@@ -655,6 +682,10 @@ void GameObject::renderVideoSettings() const {
     ui::drawText(cachedWindowCenter.x - 130, cachedWindowCenter.y + 95, 18, "Fancy Leaves", textBrush);
     fancyLeavesBox.draw();
 
+    // Horizon
+    ui::drawText(cachedWindowCenter.x - 130, cachedWindowCenter.y + 155, 18, "Distant Terrain", textBrush);
+    distantTerrainBox.draw();
+
     backBtn.draw();
 }
 
@@ -769,6 +800,10 @@ void GameObject::handlePausedMouseInput(const platform::MouseState &ms) {
             fancyLeavesBox.handleClick(ms.x, ms.y,
                                        [] { setFancyLeaves(true); Planet::planet->remeshAll(); },
                                        [] { setFancyLeaves(false); Planet::planet->remeshAll(); });
+
+            distantTerrainBox.handleClick(ms.x, ms.y,
+                                          [this] { lodTerrain.setEnabled(true); },
+                                          [this] { lodTerrain.setEnabled(false); });
         } else if (gameState.menuState == MenuState::GAME) {
             backBtn.handleClick(ms.x, ms.y, [this]() {
                 gameState.menuState = MenuState::MAIN;

@@ -12,6 +12,7 @@
 #include <glm/glm.hpp>
 #include <thread>
 #include <shared_mutex>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <memory_resource>
@@ -51,6 +52,13 @@ public:
      * @param cameraPos Where the player is in the world.
      */
     void prepare(const glm::vec3& cameraPos);
+
+    /// Where real chunks are drawn (see Renderer::uploadChunkMask); null if unchanged since the last call.
+    const uint8_t *takeChunkMaskIfChanged() {
+        if (!chunkMaskChanged) return nullptr;
+        chunkMaskChanged = false;
+        return chunkMask.data();
+    }
 
     /// Rebuilds every chunk's mesh in the background (e.g. after a graphics setting changed).
     /// The old meshes keep drawing until the new ones are uploaded.
@@ -145,7 +153,7 @@ public:
     std::atomic<unsigned int> numChunksRendered{0}; ///< How many chunks we actually drew this frame.
     /** @} */
 
-    int renderDistance = 30; ///< Radius of loaded chunks around the player.
+    int renderDistance = 16; ///< Radius of real (block) chunks around the player; distant terrain covers the rest.
     int renderHeight = 2;   ///< Vertical extent of chunk loading.
 
 private:
@@ -197,6 +205,9 @@ private:
     std::vector<ChunkPos> toDeleteList;
     std::vector<Chunk*> shadowCasters;         ///< Scratch list for the shadow pass.
     bool shadowDirty = true;                   ///< See consumeShadowDirty(); render thread only.
+    static constexpr int MASK = static_cast<int>(Renderer::CHUNK_MASK_SIZE);
+    std::array<uint8_t, MASK * MASK> chunkMask{}, chunkMaskNext{};
+    bool chunkMaskChanged = true;
 
     /** @name Load timing (see LoadStats.h) @{ */
     static constexpr int NEAR_RADIUS = 4;      ///< The 9x9 chunks around the camera count as "nearby".

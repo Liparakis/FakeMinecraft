@@ -19,5 +19,5 @@ void main() {
     vec3 diffuse = diff * frame.sunColor.rgb * (frame.simpleLighting == 1 ? vSkyLight : 1.0);
     vec3 ambient = frame.ambientStrength * frame.sunColor.rgb;
 
-    FragColor = vec4((ambient + diffuse) * texResult.rgb, texResult.a);
+    FragColor = vec4(applyFog((ambient + diffuse) * texResult.rgb, FragPos), texResult.a);
 }

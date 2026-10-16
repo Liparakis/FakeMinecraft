@@ -42,6 +42,8 @@ struct alignas(16) FrameUniforms {
     glm::vec4 sunColor{0.0f};
     glm::vec4 cameraPos{0.0f};
     glm::vec4 clipPlane{0.0f, 0.0f, 0.0f, 1.0f}; ///< Fragments with dot(pos, plane) < 0 are discarded.
+    glm::vec4 fogColor{0.0f};  ///< rgb; matches the sky so the horizon blends into it.
+    glm::vec4 fogRange{1e9f, 2e9f, 0.0f, 0.0f}; ///< x = start, y = end (horizontal distance in blocks).
     float ambientStrength = 0.0f;
     float time = 0.0f;
     int32_t simpleLighting = 0;
@@ -49,7 +51,7 @@ struct alignas(16) FrameUniforms {
 };
 
 enum class PipelineId : uint8_t {
-    World, WorldOpaque, Billboard, Fluid, Sky, Outline, Model, ShadowWorld, ShadowBillboard, UI
+    World, WorldOpaque, Billboard, Fluid, Sky, Outline, Model, ShadowWorld, ShadowBillboard, UI, Lod
 };
 
 using TextureId = uint32_t;
@@ -59,6 +61,8 @@ public:
     static constexpr uint32_t SHADOW_SIZE = 4096;
     static constexpr uint32_t REFLECTION_SIZE = 1024;
     static constexpr uint32_t PUSH_CONSTANT_SIZE = 128;
+    /// The chunk mask covers 128x128 chunks around the camera, indexed by chunk coordinate mod 128.
+    static constexpr uint32_t CHUNK_MASK_SIZE = 128;
 
     static Renderer &get();
 
@@ -71,6 +75,9 @@ public:
     void uploadMesh(GpuMesh &mesh, const void *vertices, size_t vertexBytes, const uint32_t *indices, uint32_t indexCount);
     /// Makes this frame's recorded uploads visible to vertex input. Call after the last upload, before the passes.
     void finishUploads();
+    /// Replaces the chunk mask (CHUNK_MASK_SIZE^2 bytes, non-zero where a real chunk is drawn), which distant
+    /// terrain uses to stay out of the way. Same timing rules as uploadMesh.
+    void uploadChunkMask(const uint8_t *mask);
     void releaseMesh(GpuMesh &mesh);
     /// Host-visible vertex buffer, used for small static meshes (sky quad, outline, player model).
     GpuBuffer createVertexBuffer(const void *data, size_t bytes);
@@ -156,6 +163,7 @@ private:
 
     GpuImage textureArray, shadowMap, reflectionColor, reflectionDepth;
     GpuImage msaaColor, msaaDepth, depth;
+    GpuImage chunkMask;
     VkSampler blockSampler = VK_NULL_HANDLE, nearestClamp = VK_NULL_HANDLE, linearClamp = VK_NULL_HANDLE;
     VkSampler shadowSampler = VK_NULL_HANDLE; ///< Linear depth-compare sampler (hardware PCF).
 
