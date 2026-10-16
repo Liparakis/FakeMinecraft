@@ -378,8 +378,6 @@ Planet::ReflectionCamera Planet::reflectionCamera(const glm::vec3 &cameraPos, co
 }
 
 void Planet::renderReflection(const glm::vec3 &cameraPos, const glm::mat4 &reflectionViewProjection) {
-    // Distant reflections are tiny and distorted by the water shader, so only nearby chunks are drawn.
-    constexpr float REFLECTION_RANGE = 8.0f * CHUNK_WIDTH;
     Frustum reflectionFrustum;
     reflectionFrustum.update(reflectionViewProjection);
     reflectedChunks.clear();

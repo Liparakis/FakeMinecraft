@@ -368,12 +368,13 @@ void GameObject::renderFrame() {
                                                : static_cast<float>(Planet::planet->renderDistance * CHUNK_WIDTH);
     mainUniforms.fogColor = glm::vec4(sky.getSkyColor(), 1.0f);
     // Over 16 km the haze starts early, like real air; the short real-chunk range only hides its edge.
-    mainUniforms.fogRange = glm::vec4(viewEnd * (lodTerrain.enabled() ? 0.08f : 0.55f), viewEnd, 0.0f, 0.0f);
+    mainUniforms.fogRange = glm::vec4(viewEnd * (lodTerrain.enabled() ? 0.08f : 0.55f), viewEnd, 0.0f, 1e9f);
 
     FrameUniforms reflectionUniforms = mainUniforms;
     reflectionUniforms.view = reflection.view;
     reflectionUniforms.projection = toVulkanClip(reflection.projection);
     reflectionUniforms.clipPlane = Planet::REFLECTION_CLIP_PLANE;
+    reflectionUniforms.fogRange.w = Planet::REFLECTION_RANGE; // Distant terrain fills in beyond the reflected chunks.
     renderer.setUniforms(mainUniforms, reflectionUniforms);
 
     // Chunk uploads are recorded here, before any pass begins.
@@ -383,7 +384,8 @@ void GameObject::renderFrame() {
     {
         const glm::vec3 &center = freecamActive ? savedPlayerPosition : camera.Position;
         const float nearRadius = static_cast<float>(Planet::planet->renderDistance * CHUNK_WIDTH);
-        lodTerrain.update(camera.Position, glm::vec2(center.x, center.z), nearRadius, SEED);
+        lodTerrain.update(center, glm::vec2(center.x, center.z), nearRadius, Planet::REFLECTION_RANGE,
+                          Planet::planet->chunkMaskData(), SEED);
     }
     renderer.finishUploads();
     renderer.mark("uploads");
@@ -404,8 +406,12 @@ void GameObject::renderFrame() {
     }
 
     if (Planet::planet->hasVisibleWater()) {
-        renderer.beginReflectionPass(glm::vec3(0.5f, 0.7f, 1.0f));
+        renderer.beginReflectionPass(sky.getSkyColor());
         Planet::planet->renderReflection(camera.Position, reflection.projection * reflection.view);
+        // Without it, water below distant shores would reflect bare sky.
+        Frustum reflectionFrustum;
+        reflectionFrustum.update(reflection.projection * reflection.view);
+        lodTerrain.render(reflectionFrustum, true);
         renderer.endPass();
     }
 
@@ -413,8 +419,9 @@ void GameObject::renderFrame() {
     sky.render(view, camera.Position);
     Planet::planet->render();
     {
+        // Culled like the chunks: by the player's view, so free camera (F1) shows what the player draws.
         Frustum frustum;
-        frustum.update(projection * view);
+        frustum.update(freecamActive ? savedViewProjection : projection * view);
         lodTerrain.render(frustum);
         renderer.mark("main: distant");
     }
@@ -1194,14 +1201,13 @@ void GameObject::updatePlayerPhysics(const float deltaTime) {
     // Predicted position
     glm::vec3 newPos = camera.Position + playerVelocity * deltaTime;
 
-    // Player AABB dimensions (approx 0.6 width, 1.8 height)
-    const glm::vec3 halfExtents(0.3f, 0.9f, 0.3f);
-
-    // Resolve collisions
-    const auto result = Physics::resolveCollisions(camera.Position, newPos, halfExtents);
+    // The camera is at eye level; the box (0.6 x 1.8 x 0.6) hangs below it.
+    const glm::vec3 halfExtents(0.3f, GameConstants::PLAYER_HEIGHT * 0.5f, 0.3f);
+    const glm::vec3 eyeToCenter(0.0f, GameConstants::PLAYER_HEIGHT * 0.5f - GameConstants::EYE_HEIGHT, 0.0f);
+    const auto result = Physics::resolveCollisions(camera.Position + eyeToCenter, newPos + eyeToCenter, halfExtents);
 
     // Update position and state
-    camera.Position = result.position;
+    camera.Position = result.position - eyeToCenter;
     playerOnGround = result.onGround;
 
     if (result.onGround || result.hitCeiling) {
@@ -1279,7 +1285,7 @@ void GameObject::initializePlayerModel() {
 
 void GameObject::renderPlayerModel() {
     // The model is built from the feet up; savedPlayerPosition is at eye level.
-    const glm::vec3 feetPos = savedPlayerPosition - glm::vec3(0.0f, 1.6f, 0.0f);
+    const glm::vec3 feetPos = savedPlayerPosition - glm::vec3(0.0f, GameConstants::EYE_HEIGHT, 0.0f);
     const struct {
         glm::mat4 model;
         glm::vec4 color;

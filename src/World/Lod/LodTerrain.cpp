@@ -13,6 +13,9 @@ namespace {
     /// A tile splits while the camera is closer than this many tile sizes. A cell then spans about
     /// focal / (CELLS * SPLIT_FACTOR) pixels at any distance: ~4 px at 720p and a 70 degree FOV.
     constexpr float SPLIT_FACTOR = 4.0f;
+    constexpr float REFLECTION_SPLIT_FACTOR = 1.0f; ///< ~16x fewer tiles than the main view.
+    /// Opacity of real water: TextureManager raises the water texture's alpha to 180 (LOD_WATER_ALPHA in common.glsl).
+    constexpr float WATER_ALPHA = 180.0f / 255.0f;
     constexpr size_t MAX_PENDING = 24;   ///< Tiles being built at once.
     constexpr size_t MAX_UPLOADS_PER_FRAME = 8;
 
@@ -41,9 +44,8 @@ LodTerrain::~LodTerrain() {
 
 void LodTerrain::init() {
     using namespace Blocks;
-    // Real water looks lighter than its texture (sky reflection, fresnel), so the distant version is brightened to match.
-    const auto water = TextureManager::getInstance().averageColor(TextureManager::getInstance().getLayerIndex("water_still"));
-    for (int c = 0; c < 3; ++c) waterColor[c] = static_cast<uint8_t>(std::min(255.0f, water[c] * 1.8f + 20.0f));
+    // lod.frag adds the sky reflection, as fluid.frag does for real water.
+    setColor(waterColor, TextureManager::getInstance().averageColor(TextureManager::getInstance().getLayerIndex("water_still")));
     setColor(iceColor, topColor(ICE));
     setColor(snowColor, topColor(SNOW));
 
@@ -56,6 +58,7 @@ void LodTerrain::init() {
         setColor(style.wall, topColor(biome.underBlock));
         setColor(style.steep, topColor(biome.terracottaBands ? ORANGE_TERRACOTTA : biome.steepBlock));
         style.frozen = biome.frozenWater;
+        setColor(style.floor, topColor(biome.underwaterBlock));
     }
 
     // Forests are seen from afar as their canopy: leaf colour, raised by roughly a tree's height.
@@ -86,9 +89,13 @@ void LodTerrain::shutdown() {
     done.clear();
 }
 
-void LodTerrain::update(const glm::vec3 &cameraPos, const glm::vec2 &nearCenter, const float nearRadius, const long seed) {
-    drawList.clear();
-    drawSet.clear();
+void LodTerrain::update(const glm::vec3 &cameraPos, const glm::vec2 &nearCenter, const float nearRadius,
+                        const float reflectionRadius, const uint8_t *chunkMask, const long seed) {
+    this->chunkMask = chunkMask;
+    for (Cut *cut : {&view, &reflection}) {
+        cut->list.clear();
+        cut->set.clear();
+    }
     if (!active || !initialized) return;
     ++frame;
 
@@ -132,7 +139,11 @@ void LodTerrain::update(const glm::vec3 &cameraPos, const glm::vec2 &nearCenter,
     const int z0 = static_cast<int>(std::floor((cameraPos.z - VIEW_DISTANCE) / rootSize));
     const int z1 = static_cast<int>(std::floor((cameraPos.z + VIEW_DISTANCE) / rootSize));
     for (int x = x0; x <= x1; ++x) {
-        for (int z = z0; z <= z1; ++z) select({MAX_LEVEL, x, z}, cameraPos, nearCenter, nearRadius);
+        for (int z = z0; z <= z1; ++z) {
+            select({MAX_LEVEL, x, z}, cameraPos, nearCenter, nearRadius, SPLIT_FACTOR, view);
+            select({MAX_LEVEL, x, z}, cameraPos, glm::vec2(cameraPos.x, cameraPos.z), reflectionRadius,
+                   REFLECTION_SPLIT_FACTOR, reflection);
+        }
     }
 
     // Start building the nearest missing tiles.
@@ -154,7 +165,7 @@ void LodTerrain::update(const glm::vec3 &cameraPos, const glm::vec2 &nearCenter,
     }
 
     // Forget tiles that have not been drawn for a while.
-    if (tiles.size() > 2 * drawList.size() + 64) {
+    if (tiles.size() > 2 * (view.list.size() + reflection.list.size()) + 64) {
         for (auto it = tiles.begin(); it != tiles.end();) {
             if (frame - it->second.lastUsed > 120) {
                 Renderer::get().releaseMesh(it->second.mesh);
@@ -166,7 +177,8 @@ void LodTerrain::update(const glm::vec3 &cameraPos, const glm::vec2 &nearCenter,
     }
 }
 
-void LodTerrain::select(const TileKey &key, const glm::vec3 &cameraPos, const glm::vec2 &nearCenter, const float nearRadius) {
+void LodTerrain::select(const TileKey &key, const glm::vec3 &cameraPos, const glm::vec2 &nearCenter, const float nearRadius,
+                        const float splitFactor, Cut &cut) {
     const float size = static_cast<float>(tileSize(key.level));
     const glm::vec2 min(key.x * size, key.z * size);
     const glm::vec2 cam(cameraPos.x, cameraPos.z);
@@ -174,20 +186,23 @@ void LodTerrain::select(const TileKey &key, const glm::vec3 &cameraPos, const gl
 
     if (distance > VIEW_DISTANCE) return;
     // Entirely covered by real chunks: every corner well inside their circle (a chunk is drawn when its
-    // centre is inside, so a chunk-sized margin keeps the two from ever leaving a gap between them).
+    // centre is inside, so a chunk-sized margin keeps the two from ever leaving a gap between them), and
+    // every chunk under it already drawn. Chunks still loading (at the front edge while moving) stay covered.
     const glm::vec2 farCorner(std::max(std::abs(min.x - nearCenter.x), std::abs(min.x + size - nearCenter.x)),
                               std::max(std::abs(min.y - nearCenter.y), std::abs(min.y + size - nearCenter.y)));
-    if (glm::length(farCorner) < nearRadius - static_cast<float>(CHUNK_WIDTH)) return;
+    if (glm::length(farCorner) < nearRadius - static_cast<float>(CHUNK_WIDTH) && realChunksCover(min, size)) return;
 
-    if (key.level > 0 && distance < SPLIT_FACTOR * size) {
+    if (key.level > 0 && distance < splitFactor * size) {
         for (int dx = 0; dx < 2; ++dx) {
-            for (int dz = 0; dz < 2; ++dz) select({key.level - 1, key.x * 2 + dx, key.z * 2 + dz}, cameraPos, nearCenter, nearRadius);
+            for (int dz = 0; dz < 2; ++dz) {
+                select({key.level - 1, key.x * 2 + dx, key.z * 2 + dz}, cameraPos, nearCenter, nearRadius, splitFactor, cut);
+            }
         }
         return;
     }
 
     if (tiles.contains(key)) {
-        addToDrawList(key);
+        addToCut(key, cut);
         return;
     }
     wanted.push_back(key);
@@ -196,7 +211,7 @@ void LodTerrain::select(const TileKey &key, const glm::vec3 &cameraPos, const gl
     for (TileKey parent = key; parent.level < MAX_LEVEL;) {
         parent = {parent.level + 1, parent.x >> 1, parent.z >> 1};
         if (tiles.contains(parent)) {
-            addToDrawList(parent);
+            addToCut(parent, cut);
             return;
         }
     }
@@ -204,23 +219,36 @@ void LodTerrain::select(const TileKey &key, const glm::vec3 &cameraPos, const gl
         for (int dx = 0; dx < 2; ++dx) {
             for (int dz = 0; dz < 2; ++dz) {
                 const TileKey child{key.level - 1, key.x * 2 + dx, key.z * 2 + dz};
-                if (tiles.contains(child)) addToDrawList(child);
+                if (tiles.contains(child)) addToCut(child, cut);
             }
         }
     }
 }
 
-void LodTerrain::addToDrawList(const TileKey &key) {
-    if (!drawSet.insert(key).second) return;
-    drawList.push_back(key);
+bool LodTerrain::realChunksCover(const glm::vec2 &min, const float size) const {
+    constexpr int MASK = static_cast<int>(Renderer::CHUNK_MASK_SIZE);
+    const int x0 = static_cast<int>(std::floor(min.x / CHUNK_WIDTH)), x1 = static_cast<int>(std::floor((min.x + size - 1.0f) / CHUNK_WIDTH));
+    const int z0 = static_cast<int>(std::floor(min.y / CHUNK_WIDTH)), z1 = static_cast<int>(std::floor((min.y + size - 1.0f) / CHUNK_WIDTH));
+    for (int z = z0; z <= z1; ++z) {
+        for (int x = x0; x <= x1; ++x) {
+            if (!chunkMask[(z & (MASK - 1)) * MASK + (x & (MASK - 1))]) return false;
+        }
+    }
+    return true;
+}
+
+void LodTerrain::addToCut(const TileKey &key, Cut &cut) {
+    if (!cut.set.insert(key).second) return;
+    cut.list.push_back(key);
     tiles[key].lastUsed = frame;
 }
 
-void LodTerrain::render(const Frustum &frustum) const {
-    if (!active || drawList.empty()) return;
+void LodTerrain::render(const Frustum &frustum, const bool reflection) const {
+    const std::vector<TileKey> &list = reflection ? this->reflection.list : view.list;
+    if (!active || list.empty()) return;
     Renderer &renderer = Renderer::get();
     renderer.bindPipeline(PipelineId::Lod);
-    for (const TileKey &key : drawList) {
+    for (const TileKey &key : list) {
         const Tile &tile = tiles.at(key);
         if (frustum.isBoxVisible(tile.center, tile.extents)) renderer.draw(tile.mesh);
     }
@@ -244,6 +272,7 @@ LodTerrain::BuiltTile LodTerrain::build(const TileKey &key, const long seed) con
         ColumnSample sample;
         int ground;   ///< Terrain height (top block).
         int surface;  ///< Drawn top: ground, water level or forest canopy.
+        bool water;   ///< Liquid surface (not ice); shaded like real water.
         uint8_t top[3], wall[3];
     };
     thread_local Cell grid[G][G];
@@ -271,11 +300,18 @@ LodTerrain::BuiltTile LodTerrain::build(const TileKey &key, const long seed) con
 
             const auto copy = [](uint8_t (&dst)[3], const uint8_t (&src)[3]) { std::copy(src, src + 3, dst); };
             cell.surface = cell.ground;
+            cell.water = cell.ground < WATER_LEVEL && !style.frozen;
             // Small steps read as part of the slope, so they keep the top colour; only cliffs show their rock.
             copy(cell.wall, slope >= 4 ? style.steep : style.top);
             if (cell.ground < WATER_LEVEL) {
                 cell.surface = WATER_LEVEL;
                 copy(cell.top, style.frozen ? iceColor : waterColor);
+                // Real water is translucent: the sea floor shows through, as if blended under it.
+                if (cell.water) {
+                    for (int c = 0; c < 3; ++c) {
+                        cell.top[c] = static_cast<uint8_t>(waterColor[c] * WATER_ALPHA + style.floor[c] * (1.0f - WATER_ALPHA));
+                    }
+                }
             } else if (cell.ground >= SNOW_LINE) {
                 copy(cell.top, snowColor);
                 copy(cell.wall, snowColor);
@@ -323,12 +359,12 @@ LodTerrain::BuiltTile LodTerrain::build(const TileKey &key, const long seed) con
         for (int j = 1; j <= CELLS;) {
             const Cell &cell = grid[i][j];
             int run = 1;
-            while (j + run <= CELLS && grid[i][j + run].surface == cell.surface &&
+            while (j + run <= CELLS && grid[i][j + run].surface == cell.surface && grid[i][j + run].water == cell.water &&
                    std::equal(cell.top, cell.top + 3, grid[i][j + run].top)) ++run;
             const float x0 = originX + (i - 1) * s, x1 = x0 + s;
             const float z0 = originZ + (j - 1) * s, z1 = z0 + run * s;
             const float y = static_cast<float>(cell.surface + 1);
-            quad({x0, y, z0}, {x1, y, z0}, {x1, y, z1}, {x0, y, z1}, cell.top, TOP);
+            quad({x0, y, z0}, {x1, y, z0}, {x1, y, z1}, {x0, y, z1}, cell.top, cell.water ? WATER_TOP : TOP);
             j += run;
         }
 
@@ -342,11 +378,14 @@ LodTerrain::BuiltTile LodTerrain::build(const TileKey &key, const long seed) con
                 const float neighborTop = static_cast<float>(grid[ni][nj].surface + 1);
                 const float bottom = edge ? std::min(top, neighborTop) - skirt : neighborTop;
                 if (bottom >= top) return;
+                // Water skirts are shaded like the surface, or tile seams show as dark dots.
+                const auto &color = cell.water ? cell.top : cell.wall;
+                const uint8_t shade = cell.water ? WATER_TOP : direction;
                 switch (direction) {
-                    case WEST: quad({x0, bottom, z0}, {x0, top, z0}, {x0, top, z1}, {x0, bottom, z1}, cell.wall, WEST); break;
-                    case EAST: quad({x1, bottom, z1}, {x1, top, z1}, {x1, top, z0}, {x1, bottom, z0}, cell.wall, EAST); break;
-                    case NORTH: quad({x1, bottom, z0}, {x1, top, z0}, {x0, top, z0}, {x0, bottom, z0}, cell.wall, NORTH); break;
-                    default: quad({x0, bottom, z1}, {x0, top, z1}, {x1, top, z1}, {x1, bottom, z1}, cell.wall, SOUTH); break;
+                    case WEST: quad({x0, bottom, z0}, {x0, top, z0}, {x0, top, z1}, {x0, bottom, z1}, color, shade); break;
+                    case EAST: quad({x1, bottom, z1}, {x1, top, z1}, {x1, top, z0}, {x1, bottom, z0}, color, shade); break;
+                    case NORTH: quad({x1, bottom, z0}, {x1, top, z0}, {x0, top, z0}, {x0, bottom, z0}, color, shade); break;
+                    default: quad({x0, bottom, z1}, {x0, top, z1}, {x1, top, z1}, {x1, bottom, z1}, color, shade); break;
                 }
             };
             wall(i - 1, j, i == 1, WEST);

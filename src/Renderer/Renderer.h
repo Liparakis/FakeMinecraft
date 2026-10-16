@@ -43,7 +43,7 @@ struct alignas(16) FrameUniforms {
     glm::vec4 cameraPos{0.0f};
     glm::vec4 clipPlane{0.0f, 0.0f, 0.0f, 1.0f}; ///< Fragments with dot(pos, plane) < 0 are discarded.
     glm::vec4 fogColor{0.0f};  ///< rgb; matches the sky so the horizon blends into it.
-    glm::vec4 fogRange{1e9f, 2e9f, 0.0f, 0.0f}; ///< x = start, y = end (horizontal distance in blocks).
+    glm::vec4 fogRange{1e9f, 2e9f, 0.0f, 1e9f}; ///< x = fog start, y = fog end (blocks, horizontal); w = real-chunk reach (lod.frag).
     float ambientStrength = 0.0f;
     float time = 0.0f;
     int32_t simpleLighting = 0;

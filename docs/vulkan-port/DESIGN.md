@@ -162,12 +162,21 @@ out to 16,448 blocks, the distance Minecraft reaches at render distance 1028.
 - **Seam with real chunks.** `Planet` writes a 128x128 mask of which chunks are
   drawn (chunk coordinate mod 128), and `lod.frag` discards fragments over them.
   LOD tiles are skipped only when they lie fully inside the real-chunk circle,
-  less one chunk of margin, so the two never leave a gap. Tile edges carry
+  less one chunk of margin, and every chunk under them is drawn. Otherwise
+  chunks still loading at the front edge while moving leave a strip of sky. Tile edges carry
   skirts so neighbouring levels don't show cracks.
 - **Fog.** Every world shader fades to the sky colour by horizontal distance,
   from 8% of the view distance (~1.3 km) to its end, as haze. The far plane sits at 1.5x the view
   distance. With "Distant Terrain" off (Video Settings), the fog ends at the
   real-chunk radius instead.
+- **Water.** LOD water and real water share one model in `common.glsl`:
+  the water colour mixed with the reflection map by a Schlick fresnel term. Real
+  water is 71% opaque, so LOD water blends in its biome's sea-floor colour at the
+  same ratio and only that part reflects; otherwise the real/LOD edge shows. The
+  reflection pass draws real chunks within 8 chunks, then a coarser LOD cut
+  (split at 1x tile size, ~16x fewer tiles) beyond them. Without it, water under
+  distant shores reflected bare sky and showed as a bright band below the
+  horizon. The coarse cut costs ~0.07 ms; the full-detail one cost 0.72 ms.
 - **Not drawn far away:** trees as individual blocks, caves, structures and
   player edits.
 

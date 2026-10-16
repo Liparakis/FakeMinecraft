@@ -54,6 +54,7 @@ public:
     void prepare(const glm::vec3& cameraPos);
 
     /// Where real chunks are drawn (see Renderer::uploadChunkMask); null if unchanged since the last call.
+    [[nodiscard]] const uint8_t *chunkMaskData() const { return chunkMask.data(); }
     const uint8_t *takeChunkMaskIfChanged() {
         if (!chunkMaskChanged) return nullptr;
         chunkMaskChanged = false;
@@ -85,6 +86,8 @@ public:
 
     /// Clip plane that keeps only geometry above the water surface in the reflection.
     static inline const glm::vec4 REFLECTION_CLIP_PLANE{0.0f, 1.0f, 0.0f, -64.5f};
+    /// Real chunks drawn in the reflection (distant reflections are tiny and distorted by the water shader).
+    static constexpr float REFLECTION_RANGE = 8.0f * CHUNK_WIDTH;
 
     /// True when water was visible last frame, i.e. the reflection is worth rendering.
     [[nodiscard]] bool hasVisibleWater() const { return !waterChunks.empty(); }

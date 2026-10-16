@@ -38,20 +38,8 @@ void main() {
     if (texResult.a < 0.1)
         discard;
 
-    // Where this fragment sits in the reflection camera's view, with a little wave distortion.
-    vec2 reflectionUV = targetCoords(FragPosReflectionSpace).xy;
-    reflectionUV += vec2(sin(FragPos.x * 0.8 + frame.time * 0.7), sin(FragPos.z * 1.2 + frame.time * 0.5)) * 0.003;
-    reflectionUV = clamp(reflectionUV, 0.001, 0.999);
-
-    vec3 reflectionColor = texture(reflectionMap, reflectionUV).rgb;
-    reflectionColor = mix(reflectionColor, reflectionColor * vec3(0.3, 0.5, 0.7), 0.3);
-
-    // Water reflects more at grazing angles (Schlick's approximation).
-    // Ref: https://en.wikipedia.org/wiki/Schlick%27s_approximation
-    vec3 viewDir = normalize(frame.cameraPos.xyz - FragPos);
-    float fresnel = clamp(pow(1.0 - max(dot(viewDir, normal), 0.0), 2.0), 0.15, 0.65);
-    fresnel *= clamp(length(frame.sunColor.rgb), 0.0, 1.0); // No reflections at night.
-
+    vec3 reflectionColor = waterReflection(FragPos);
+    float fresnel = waterFresnel(FragPos);
     vec3 waterColor = totalLight * texResult.rgb;
     if (texResult.a > 0.5 && fresnel > 0.01) {
         FragColor = vec4(applyFog(mix(waterColor, reflectionColor, fresnel), FragPos), texResult.a);

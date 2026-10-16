@@ -34,6 +34,7 @@ public:
     static constexpr int BASE_SPACING = 4;    ///< Blocks per sample at level 0.
     static constexpr int MAX_LEVEL = 8;       ///< Level 8 samples every 1024 blocks.
     static constexpr float VIEW_DISTANCE = 16448.0f; ///< Minecraft render distance 1028 (x16 blocks).
+    static constexpr uint8_t WATER_TOP = 7; ///< LodVertex::direction of water surfaces (LOD_WATER_TOP in common.glsl).
 
     LodTerrain() = default;
     ~LodTerrain();
@@ -49,9 +50,12 @@ public:
     /// Chooses the tiles for this camera, starts building missing ones and uploads finished ones.
     /// Records uploads, so it runs after Renderer::beginFrame and before the first pass.
     /// @param nearCenter, nearRadius Real chunks are drawn within this horizontal circle; tiles fully inside it are skipped.
-    void update(const glm::vec3 &cameraPos, const glm::vec2 &nearCenter, float nearRadius, long seed);
-    /// Draws the selected tiles that pass the frustum; must run inside the main pass.
-    void render(const Frustum &frustum) const;
+    /// @param reflectionRadius Real chunks are reflected within this distance of the camera.
+    /// @param chunkMask Which real chunks are drawn (Planet::chunkMaskData); tiles are skipped only over drawn chunks.
+    void update(const glm::vec3 &cameraPos, const glm::vec2 &nearCenter, float nearRadius, float reflectionRadius,
+                const uint8_t *chunkMask, long seed);
+    /// Draws the selected tiles that pass the frustum, inside the main pass or (coarser) the reflection pass.
+    void render(const Frustum &frustum, bool reflection = false) const;
 
 private:
     struct TileKey {
@@ -79,14 +83,23 @@ private:
     /// Per-biome colours and canopy, indexed by BiomeID.
     struct BiomeStyle {
         uint8_t top[3], wall[3], steep[3];
+        uint8_t floor[3]; ///< Sea floor, seen through the water.
         uint8_t canopy[3];
         float canopyHeight = 0.0f; ///< Forests are drawn as a raised, leaf-coloured surface.
         bool frozen = false;
     };
 
+    /// A set of tiles that covers the view once, without overlaps.
+    struct Cut {
+        std::vector<TileKey> list;
+        std::unordered_set<TileKey, TileKeyHash> set;
+    };
+
     static int tileSize(const int level) { return CELLS * BASE_SPACING << level; }
-    void select(const TileKey &key, const glm::vec3 &cameraPos, const glm::vec2 &nearCenter, float nearRadius);
-    void addToDrawList(const TileKey &key);
+    void select(const TileKey &key, const glm::vec3 &cameraPos, const glm::vec2 &nearCenter, float nearRadius,
+                float splitFactor, Cut &cut);
+    void addToCut(const TileKey &key, Cut &cut);
+    [[nodiscard]] bool realChunksCover(const glm::vec2 &min, float size) const;
     BuiltTile build(const TileKey &key, long seed) const;
 
     bool active = true;
@@ -100,8 +113,9 @@ private:
     std::unordered_map<TileKey, Tile, TileKeyHash> tiles; ///< Uploaded tiles (render thread).
     std::unordered_set<TileKey, TileKeyHash> pending;      ///< Being built (render thread).
     std::vector<TileKey> wanted;                           ///< This frame's missing tiles, nearest first.
-    std::vector<TileKey> drawList;
-    std::unordered_set<TileKey, TileKeyHash> drawSet;
+    Cut view;       ///< Drawn in the main pass.
+    Cut reflection; ///< Coarser: the reflection is low resolution and rippled.
+    const uint8_t *chunkMask = nullptr; ///< During update().
 
     std::mutex doneMutex;
     std::vector<BuiltTile> done; ///< Finished by workers, waiting for upload.

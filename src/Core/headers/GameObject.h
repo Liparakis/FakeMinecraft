@@ -233,6 +233,8 @@ namespace GameConstants {
     constexpr float CROSSHAIR_SIZE = 5.0f;
     constexpr float CROSSHAIR_THICKNESS = 25.0f;
     constexpr float MOVEMENT_SPEED_MULTIPLIER = 0.02f;
+    constexpr float PLAYER_HEIGHT = 1.8f;  ///< Minecraft's: fits through a 2-block gap.
+    constexpr float EYE_HEIGHT = 1.62f;    ///< Camera height above the feet.
     constexpr float FOV_DEGREES = 70.0f;   ///< Vertical, Minecraft's default; wider makes the world look small.
     constexpr float WALK_SPEED = 4.317f;   ///< Blocks per second, as in Minecraft.
     constexpr float SPRINT_SPEED = 5.612f; ///< Left Ctrl.
