@@ -76,3 +76,36 @@ seconds and quits; `FAKEMC_SCREENSHOT_PLAYING`, `FAKEMC_CAMERA="x,y,z,yaw,pitch"
 
 Not verified automatically: mouse/keyboard interaction (block breaking and
 placing, menus, fullscreen toggle) and sound.
+
+## World loading (2026-10-16)
+
+Measured with the `[LOAD]` line the game prints once per world (spawn, render
+distance 30 = 3,721 chunks, menu open, 16 hardware threads):
+
+| | Before | After |
+| --- | --- | --- |
+| Nearest 9x9 chunks drawable | 0.68-0.79 s | 0.09-0.18 s |
+| All 3,721 chunks drawable | 29.8-32.1 s | 2.1-3.2 s (depends on other load on the machine) |
+| Meshes built | 7,441 (each chunk meshed twice) | 3,721 (once each) |
+| Working set at spawn | 6.8 GB | 2.4-2.8 GB, flat while flying at 120 blocks/s |
+
+What changed:
+
+- The thread pool was never fed (the dispatcher checked the wrong queue), so
+  every chunk was generated, lit and meshed on one thread. The chunk thread now
+  only dispatches; up to 2x the worker count of builds run nearest-first on a
+  pool with `hardware_concurrency - 2` workers.
+- Each chunk has a `meshMutex` held while it is meshed, uploaded (try-lock from
+  the render thread) or reset; it is never taken while holding `chunkMutex`.
+- A chunk is lit when built and meshed once all four neighbours are lit (or out
+  of range), so its one mesh already has their lava light. Border faces next to a
+  missing neighbour derive its sky light from block data, which is what the
+  neighbour computes itself. Only chunks that were meshed before a neighbour
+  existed (camera moved) are remeshed, and only if lava light crosses the border.
+- Sub-mesh buffers are per-thread scratch; merged meshes are freed after upload.
+  Chunks above/below the single world layer share one read-only air block instead
+  of 256 KB each. Unreferenced block data is freed every second.
+- Mesher: a per-id lookup table replaces registry lookups in the face loops, and
+  every pass stops at the chunk's highest non-air block. The sky-light pass stops
+  at the first blocker. Generation fills columns in spans (checksums of generated
+  chunks are byte-identical to before).

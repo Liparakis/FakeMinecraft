@@ -2,6 +2,7 @@
 #include "Blocks.h"
 #include "BlockRegistry.h"
 #include "Planet.h"
+#include <array>
 #include <queue>
 #include <cstring>
 
@@ -9,12 +10,27 @@
 // This uses a Flood Fill / BFS approach common in voxel games.
 // Reference: https://gist.github.com/JuanDiegoMontoya/383bf2cc2ad3d1b8717a42b1f0bc6a7b
 void Chunk::computeLightMap() {
-    // Clear light map
+    // Neighbours read this chunk's light map from other threads, so the new map is built in
+    // scratch space and published with one copy at the end. The local name shadows the member.
+    thread_local uint8_t scratch[CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_WIDTH];
+    uint8_t (&lightMap)[CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_WIDTH] = scratch;
     memset(lightMap, 0, sizeof(lightMap));
 
-    if (!chunkData) return;
+    if (!chunkData) {
+        memcpy(this->lightMap, lightMap, sizeof(lightMap));
+        for (auto &flag : borderBlockLight) flag = false;
+        return;
+    }
 
     const BlockRegistry& registry = BlockRegistry::getInstance();
+    // Solids, leaves and liquids stop sunlight; built once since block types never change.
+    static const auto blocksSky = [] {
+        std::array<bool, 256> table{};
+        for (const Block &b : BlockRegistry::getInstance().getAllBlocks()) {
+            table[b.id] = b.blockType == Block::SOLID || b.blockType == Block::LEAVES || b.blockType == Block::LIQUID;
+        }
+        return table;
+    }();
     const int CW = CHUNK_WIDTH;
     const int CH = CHUNK_HEIGHT;
     const int strideX = CW * CH;
@@ -152,34 +168,31 @@ void Chunk::computeLightMap() {
         }
     }
 
-    // --- PASS 2: SKY LIGHT ---
-    // Check which blocks can see the sky (Sunlight Shadowing).
-    
-    for (int x = 0; x < CW; x++) {
-        for (int z = 0; z < CW; z++) {
-            // Start from sky (Light 15)
-            // Go down until we hit SOLID or LIQUID (water attenuates, but for simple occlusion we can stop or reduce)
-            // Let's stop at SOLID. Leaves? Stop.
-             
-             bool exposed = true;
-             for (int y = CH - 1; y >= 0; y--) {
-                 int idx = x * strideX + z * strideZ + y;
-                 uint8_t blockId = chunkData->data[idx];
-                 const Block& block = registry.getBlock(blockId);
-
-                 if (exposed) {
-                     // Set Sky Light to 15
-                     lightMap[idx] = (lightMap[idx] & 0x0F) | (15 << 4);
-                 } else {
-                     // Shadow (0)
-                     lightMap[idx] = (lightMap[idx] & 0x0F) | (0 << 4);
-                 }
-
-                 // Occlusion check
-                 if (block.blockType == Block::SOLID || block.blockType == Block::LEAVES || block.blockType == Block::LIQUID) {
-                     exposed = false;
-                 }
-             }
+    // Neighbours only need to be remeshed for this chunk's lava light if it reaches their border.
+    bool reaches[4] = {};
+    for (int a = 0; a < CW; a++) {
+        for (int y = 0; y < CH; y++) {
+            reaches[0] |= (lightMap[a * strideX + 0 * strideZ + y] & 0x0F) > 1;
+            reaches[1] |= (lightMap[a * strideX + (CW - 1) * strideZ + y] & 0x0F) > 1;
+            reaches[2] |= (lightMap[0 * strideX + a * strideZ + y] & 0x0F) > 1;
+            reaches[3] |= (lightMap[(CW - 1) * strideX + a * strideZ + y] & 0x0F) > 1;
         }
     }
+    for (int side = 0; side < 4; side++) borderBlockLight[side] = reaches[side];
+
+    // --- PASS 2: SKY LIGHT ---
+    // Each column is lit (15) from the top down to and including the first block that blocks
+    // the sky; everything below keeps sky light 0, which the memset above already set.
+    for (int x = 0; x < CW; x++) {
+        for (int z = 0; z < CW; z++) {
+            const int column = x * strideX + z * strideZ;
+            for (int y = CH - 1; y >= 0; y--) {
+                const int idx = column + y;
+                lightMap[idx] = (lightMap[idx] & 0x0F) | (15 << 4);
+                if (blocksSky[chunkData->data[idx]]) break;
+            }
+        }
+    }
+
+    memcpy(this->lightMap, lightMap, sizeof(lightMap));
 }

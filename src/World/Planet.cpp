@@ -8,6 +8,7 @@
 #include <iostream>
 #include <vector>
 #include "WorldGen.h"
+#include "LoadStats.h"
 #include "glm/gtc/matrix_transform.hpp"
 
 // These macros help the CPU predict which way the code usually goes.
@@ -31,6 +32,7 @@ static constexpr size_t EXPECTED_CHUNK_COUNT = 4000;
 static constexpr size_t EXPECTED_VISIBLE_CHUNKS = 800;
 
 Planet::Planet() {
+    loadStart = loadstats::Clock::now();
     // Reserve some space upfront so it doesn't slow down the game later.
     chunks.reserve(EXPECTED_CHUNK_COUNT);
     chunkList.reserve(EXPECTED_CHUNK_COUNT);
@@ -52,6 +54,8 @@ Planet::~Planet() {
     if (chunkThread.joinable()) {
         chunkThread.join();
     }
+    chunkGenPool.clearPending();
+    chunkGenPool.waitAll();
 
     // Each chunk hands its GPU meshes back to the renderer as it is destroyed.
     for (auto &[pos, chunk] : chunks) delete chunk;
@@ -69,6 +73,9 @@ void Planet::prepare(const glm::vec3 &cameraPos) {
 
     // Check if the seed changed early on.
     if (UNLIKELY(currentSeed != cachedSeed)) {
+        // Workers bail out once they see the new seed; wait for them before freeing their chunks.
+        chunkGenPool.clearPending();
+        chunkGenPool.waitAll();
         std::unique_lock lock(chunkMutex);
 
         if (currentSeed != last_seed.load(std::memory_order_relaxed)) {
@@ -96,9 +103,15 @@ void Planet::prepare(const glm::vec3 &cameraPos) {
             renderChunksDirty.store(true, std::memory_order_release);
 
             chunkQueue = {};
-            chunkDataQueue = {};
             regenQueue = {};
             regenPending.clear();
+            inFlight.clear();
+            loadStart = loadstats::Clock::now();
+            nearReported = allReported = false;
+            loadstats::generationMicros = 0;
+            loadstats::meshingMicros = 0;
+            loadstats::generatedChunks = 0;
+            loadstats::meshedChunks = 0;
         }
         return;
     }
@@ -133,6 +146,7 @@ void Planet::prepare(const glm::vec3 &cameraPos) {
     }
 
     int chunksUploadedThisFrame = 0;
+    int readyChunks = 0, readyNear = 0;
 
     // Cache commonly used values to avoid recomputation in loops.
     const float maxDist = static_cast<float>(renderDistance) * CHUNK_WIDTH;
@@ -159,11 +173,15 @@ void Planet::prepare(const glm::vec3 &cameraPos) {
             continue;
         }
 
+        if (chunk->ready) {
+            ++readyChunks;
+            if (std::abs(pos.x - newCamChunkX) <= NEAR_RADIUS && std::abs(pos.z - newCamChunkZ) <= NEAR_RADIUS) ++readyNear;
+        }
+
         const bool needsUpload = chunk->generated && !chunk->ready;
         if (UNLIKELY(needsUpload)) {
-            // Uploads are limited to 4 per frame to prevent stuttering.
-            if (chunksUploadedThisFrame < 4) {
-                chunk->uploadMesh();
+            // Uploads are capped per frame so a burst of finished chunks can't stall one frame.
+            if (chunksUploadedThisFrame < MAX_UPLOADS_PER_FRAME && chunk->uploadMesh()) {
                 ++chunksUploadedThisFrame;
             }
             chunksLoading.fetch_add(1, std::memory_order_relaxed);
@@ -195,6 +213,8 @@ void Planet::prepare(const glm::vec3 &cameraPos) {
             }
         }
     }
+
+    reportLoadProgress(readyNear, readyChunks);
 
     // We need to sort these lists so that depth testing and blending works right.
     const bool cameraMoved = (newCamChunkX != prevSortCamX) || (newCamChunkZ != prevSortCamZ);
@@ -247,6 +267,29 @@ void Planet::prepare(const glm::vec3 &cameraPos) {
         renderChunksDirty.store(false, std::memory_order_release);
     }
 
+}
+
+void Planet::reportLoadProgress(const int readyNear, const int readyChunks) {
+    using namespace loadstats;
+    const auto ms = [&] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - loadStart).count();
+    };
+    constexpr int nearCount = (2 * NEAR_RADIUS + 1) * (2 * NEAR_RADIUS + 1);
+    const int allCount = (2 * renderDistance + 1) * (2 * renderDistance + 1);
+
+    if (!nearReported && readyNear >= nearCount) {
+        nearReported = true;
+        std::cout << "[LOAD] nearest " << nearCount << " chunks drawable after " << ms() << " ms" << std::endl;
+    }
+    if (!allReported && readyChunks >= allCount) {
+        allReported = true;
+        const int64_t gen = generatedChunks.load(), meshed = meshedChunks.load();
+        std::cout << "[LOAD] all " << allCount << " chunks drawable after " << ms() << " ms; generation "
+                  << generationMicros.load() / 1000 << " ms CPU for " << gen << " chunks ("
+                  << (gen ? generationMicros.load() / gen : 0) << " us each), meshing "
+                  << meshingMicros.load() / 1000 << " ms CPU for " << meshed << " meshes ("
+                  << (meshed ? meshingMicros.load() / meshed : 0) << " us each)" << std::endl;
+    }
 }
 
 void Planet::render() {
@@ -365,7 +408,7 @@ void Planet::updateFrustum(const glm::mat4 &frustumVP) {
 //==============================================================================
 
 void Planet::chunkThreadUpdate() {
-    static int cleanupCounter = 0;
+    auto lastCleanup = std::chrono::steady_clock::now();
 
     while (!shouldEnd.load(std::memory_order_acquire)) {
         // If the seed changes, we need to stop what we're doing.
@@ -374,10 +417,11 @@ void Planet::chunkThreadUpdate() {
             continue;
         }
 
-        // Throttling the cleanup of old chunk data to avoid hitting the lock too much.
-        if (++cleanupCounter > 5000) {
+        // Free block data nothing references any more (chunks that left the render distance).
+        // Time-based, so memory stays bounded however fast the camera moves.
+        if (const auto now = std::chrono::steady_clock::now(); now - lastCleanup > std::chrono::seconds(1)) {
             cleanupUnusedChunkData();
-            cleanupCounter = 0;
+            lastCleanup = now;
         }
 
         // Atomic loads are used here to minimize locking when reading camera positions.
@@ -392,45 +436,75 @@ void Planet::chunkThreadUpdate() {
         if ((currentCamX != prevCamX) | (currentCamY != prevCamY) | (currentCamZ != prevCamZ)) {
             updateChunkQueue();
         } else {
-            // Process task queues if camera is stationary.
-            const bool allQueuesEmpty = chunkQueue.empty() &&
-                                       chunkDataQueue.empty() &&
-                                       regenQueue.empty();
+            // Hand queued work to the pool; the dispatcher itself never generates or meshes.
+            if (!dispatchWork()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+}
 
-            if (UNLIKELY(allQueuesEmpty)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            } else {
-                processChunkDataQueue();
-                processRegenQueue();
-                processChunkQueue();
+bool Planet::dispatchWork() {
+    std::vector<ChunkPos> remesh;
+    std::vector<ChunkPos> build;
+    {
+        std::unique_lock lock(chunkMutex);
+        while (!regenQueue.empty()) {
+            remesh.push_back(regenQueue.front());
+            regenPending.erase(regenQueue.front());
+            regenQueue.pop();
+        }
+
+        // A bounded number of builds in flight keeps the pool working nearest-first, and lets
+        // a camera move re-prioritise the queue instead of finishing a long backlog.
+        const size_t maxInFlight = chunkGenPool.workerCount() * 2;
+        while (inFlight.size() < maxInFlight && !chunkQueue.empty()) {
+            const ChunkPos pos = chunkQueue.front();
+            chunkQueue.pop();
+            if (chunks.contains(pos) || !inFlight.insert(pos).second) continue;
+            build.push_back(pos);
+        }
+    }
+
+    if (remesh.empty() && build.empty()) {
+        std::unique_lock lock(chunkMutex);
+        if (chunkQueue.empty() && inFlight.empty()) {
+            for (Chunk *chunk : chunkList) {
+                if (chunk->meshRequested) continue;
+                chunk->meshRequested = true;
+                remesh.push_back(chunk->chunkPos);
             }
         }
     }
+
+    for (const ChunkPos &pos : remesh) chunkGenPool.submit([this, pos] { remeshChunk(pos); });
+    for (const ChunkPos &pos : build) chunkGenPool.submit([this, pos] { buildChunk(pos); });
+    return !remesh.empty() || !build.empty();
 }
 
-void Planet::processRegenQueue() {
-    if (regenQueue.empty()) return;
-
-    std::unique_lock lock(chunkMutex);
-
-    const ChunkPos chunkPos = regenQueue.front();
-    regenQueue.pop();
-    regenPending.erase(chunkPos);
-
-    auto it = chunks.find(chunkPos);
-    if (it != chunks.end()) {
-        Chunk* const chunk = it->second;
-
-        lock.unlock();
-        chunk->generateChunkMesh();
-        lock.lock();
-
-        if (chunks.find(chunkPos) != chunks.end()) {
-            chunk->ready = false;
-        }
+bool Planet::neighborsLit(const ChunkPos pos) const {
+    constexpr int offsets[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    for (const auto &[dx, dz] : offsets) {
+        const ChunkPos n(pos.x + dx, pos.y, pos.z + dz);
+        if (!chunks.contains(n) && !isOutOfRenderDistance(n)) return false;
     }
+    return true;
 }
 
+void Planet::requestMeshIfReady(Chunk *chunk) {
+    if (chunk->meshRequested || !neighborsLit(chunk->chunkPos)) return;
+    chunk->meshRequested = true;
+    if (regenPending.insert(chunk->chunkPos).second) regenQueue.push(chunk->chunkPos);
+}
+
+void Planet::remeshChunk(const ChunkPos pos) {
+    Chunk *const chunk = getChunk(pos);
+    if (!chunk) return;
+
+    std::lock_guard meshLock(chunk->meshMutex);
+    // The chunk may have been pooled or reused for another position while we waited for the lock.
+    if (getChunk(pos) != chunk || !(chunk->chunkPos == pos)) return;
+    chunk->generateChunkMesh();
+    chunk->ready = false;
+}
 //==============================================================================
 // CHUNK DATA CLEANUP
 //==============================================================================
@@ -542,127 +616,83 @@ inline void Planet::addChunkIfMissing(int x, int y, int z) {
 // CHUNK DATA PROCESSING
 //==============================================================================
 
-void Planet::processChunkDataQueue() {
-    std::unique_lock lock(chunkMutex);
 
-    if (chunkQueue.empty()) return;
-
-    // Process multiple chunks in parallel to saturate generator worker threads.
-    const size_t maxBatch = std::min(chunkDataQueue.size(),
-                                    chunkGenPool.workerCount() * 2);
-
-    // Use static thread_local to avoid repeated allocations of the generation task list.
-    static thread_local std::vector<ChunkPos> toGenerate;
-    toGenerate.clear();
-    toGenerate.reserve(maxBatch);
-
-    for (size_t i = 0; i < maxBatch && !chunkDataQueue.empty(); ++i) {
-        const ChunkPos chunkPos = chunkDataQueue.front();
-        chunkDataQueue.pop();
-
-        if (chunkData.find(chunkPos) == chunkData.end()) {
-            toGenerate.push_back(chunkPos);
+void Planet::buildChunk(const ChunkPos chunkPos) {
+    // Whatever happens below, this position is no longer in flight afterwards.
+    struct InFlightGuard {
+        Planet *planet;
+        ChunkPos pos;
+        ~InFlightGuard() {
+            std::unique_lock lock(planet->chunkMutex);
+            planet->inFlight.erase(pos);
         }
-    }
+    } guard{this, chunkPos};
 
-    lock.unlock();
+    if (UNLIKELY(SEED != last_seed.load(std::memory_order_relaxed)) || isOutOfRenderDistance(chunkPos)) return;
 
-    if (UNLIKELY(SEED != last_seed.load(std::memory_order_relaxed))) return;
-
-    // Sending all these chunks to be generated in parallel so it's faster.
-    for (const ChunkPos &pos: toGenerate) {
-        chunkGenPool.submit([this, pos]() {
-            if (UNLIKELY(SEED != last_seed.load(std::memory_order_relaxed))) return;
-
-            // Allocating memory for the chunk data and storing it in a shared_ptr.
-            auto *d = new uint8_t[CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_WIDTH];
-            WorldGen::generateChunkData(pos, d, SEED);
-            const auto data = std::make_shared<ChunkData>(d);
-
-            std::unique_lock dataLock(chunkMutex);
-            if (chunkData.find(pos) == chunkData.end()) {
-                chunkData[pos] = data;
-            }
-        });
-    }
-}
-
-void Planet::processChunkQueue() {
-    std::unique_lock lock(chunkMutex);
-
-    if (chunkQueue.empty()) {
-        lock.unlock();
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        return;
-    }
-
-    const ChunkPos chunkPos = chunkQueue.front();
-
-    // Skip if already exists
-    if (chunks.find(chunkPos) != chunks.end()) {
-        chunkQueue.pop();
-        return;
-    }
-
-    lock.unlock();
-
-    // Check seed before expensive generation
-    if (UNLIKELY(SEED != last_seed.load(std::memory_order_relaxed))) return;
-
-    // Get chunk from pool or create if needed. Using an object pool reduces frequent new/delete operations.
-    Chunk *chunk;
+    // Reuse a pooled chunk when possible. reset() takes the chunk's mesh lock, so it runs
+    // after chunkMutex is released (lock order: meshMutex before chunkMutex).
+    Chunk *chunk = nullptr;
     {
-        std::unique_lock poolLock(chunkMutex);
+        std::unique_lock lock(chunkMutex);
         if (!chunkPool.empty()) {
             chunk = chunkPool.back();
             chunkPool.pop_back();
-            chunk->reset(chunkPos);
-        } else {
-            chunk = new Chunk(chunkPos);
         }
     }
+    if (chunk) chunk->reset(chunkPos);
+    else chunk = new Chunk(chunkPos);
 
     if (!populateChunkData(chunk, chunkPos)) {
-        std::unique_lock poolLock(chunkMutex);
+        std::unique_lock lock(chunkMutex);
         chunkPool.push_back(chunk);
         return;
     }
 
-    chunk->generateChunkMesh();
+    // Only light here. The chunk is meshed once all four neighbours are lit too, so its single mesh
+    // already includes their lava light and no neighbour has to be remeshed for it.
+    {
+        std::lock_guard meshLock(chunk->meshMutex);
+        chunk->computeLightMap();
+    }
 
-    lock.lock();
-    if (chunks.find(chunkPos) == chunks.end()) {
-        chunks[chunkPos] = chunk;
-        chunk->listIndex = chunkList.size();
-        chunkList.push_back(chunk);
-        renderChunksDirty.store(true, std::memory_order_release);
+    std::unique_lock lock(chunkMutex);
+    if (chunks.contains(chunkPos) || SEED != last_seed.load(std::memory_order_relaxed)) {
+        chunkPool.push_back(chunk);
+        return;
+    }
+    chunks[chunkPos] = chunk;
+    chunk->listIndex = chunkList.size();
+    chunkList.push_back(chunk);
+    renderChunksDirty.store(true, std::memory_order_release);
 
-        // Batched neighbor notifications: Alert neighbors that a new data source is available.
-        constexpr int neighborOffsets[6][3] = {
-            {1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, -1, 0}
-        };
-
-        std::shared_ptr<ChunkData> Chunk::* const dataPtrs[6] = {
-            &Chunk::westData, &Chunk::eastData, &Chunk::northData,
-            &Chunk::southData, &Chunk::downData, &Chunk::upData
-        };
-
-        for (int i = 0; i < 6; ++i) {
-            const ChunkPos nPos(chunkPos.x + neighborOffsets[i][0],
-                               chunkPos.y + neighborOffsets[i][1],
-                               chunkPos.z + neighborOffsets[i][2]);
-            auto it = chunks.find(nPos);
-            if (it != chunks.end()) {
-                it->second->*dataPtrs[i] = chunk->chunkData;
-                if (regenPending.insert(nPos).second) regenQueue.push(nPos);
+    // Tell existing neighbours about the new data, and mesh any whose four neighbours are now all lit.
+    constexpr int neighborOffsets[6][3] = {
+        {1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, -1, 0}
+    };
+    // Border of the new chunk facing each offset (East, West, South, North; -1 for up/down).
+    constexpr int facingBorder[6] = {3, 2, 1, 0, -1, -1};
+    std::shared_ptr<ChunkData> Chunk::* const dataPtrs[6] = {
+        &Chunk::westData, &Chunk::eastData, &Chunk::northData,
+        &Chunk::southData, &Chunk::downData, &Chunk::upData
+    };
+    for (int i = 0; i < 6; ++i) {
+        const ChunkPos nPos(chunkPos.x + neighborOffsets[i][0], chunkPos.y + neighborOffsets[i][1],
+                            chunkPos.z + neighborOffsets[i][2]);
+        if (auto it = chunks.find(nPos); it != chunks.end()) {
+            Chunk *const neighbor = it->second;
+            neighbor->*dataPtrs[i] = chunk->chunkData;
+            if (facingBorder[i] < 0) continue;
+            if (!neighbor->meshRequested) {
+                requestMeshIfReady(neighbor);
+            } else if (chunk->borderBlockLight[facingBorder[i]] && regenPending.insert(nPos).second) {
+                // Already meshed before this chunk existed (e.g. the camera moved): refresh its lava light.
+                regenQueue.push(nPos);
             }
         }
-    } else {
-        delete chunk;
     }
-    chunkQueue.pop();
+    requestMeshIfReady(chunk);
 }
-
 bool Planet::populateChunkData(Chunk *chunk, const ChunkPos &chunkPos) {
     // Use stack array for better cache locality during neighbor data acquisition.
     struct NeighborInfo {
@@ -700,6 +730,14 @@ bool Planet::populateChunkData(Chunk *chunk, const ChunkPos &chunkPos) {
 }
 
 std::shared_ptr<ChunkData> Planet::getOrCreateChunkData(const ChunkPos &pos) {
+    // The world is a single chunk tall, so everything above or below it is air. All of those
+    // positions share one read-only block instead of allocating 256 KB of air each.
+    if (pos.y != 0) {
+        static const std::shared_ptr<ChunkData> emptyData =
+            std::make_shared<ChunkData>(new uint8_t[CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_WIDTH]());
+        return emptyData;
+    }
+
     std::unique_lock lock(chunkMutex);
 
     auto it = chunkData.find(pos);
@@ -713,12 +751,15 @@ std::shared_ptr<ChunkData> Planet::getOrCreateChunkData(const ChunkPos &pos) {
 
     // Perform expensive procedural generation outside of the mutex lock.
     auto *d = new uint8_t[CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_WIDTH];
-    WorldGen::generateChunkData(pos, d, SEED);
+    {
+        loadstats::ScopedTimer timer(loadstats::generationMicros);
+        WorldGen::generateChunkData(pos, d, SEED);
+    }
+    loadstats::generatedChunks.fetch_add(1, std::memory_order_relaxed);
     auto data = std::make_shared<ChunkData>(d);
 
     lock.lock();
-    chunkData[pos] = data;
-    return data;
+    return chunkData.emplace(pos, data).first->second;
 }
 
 //==============================================================================

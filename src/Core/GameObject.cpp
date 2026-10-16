@@ -140,6 +140,8 @@ void GameObject::init() {
     // Both exercise swapchain and pipeline rebuilds in automated checks.
     int resizeW = 0, resizeH = 0;
     int minimizeStep = std::getenv("FAKEMC_MINIMIZE") ? 1 : 0;
+    // FAKEMC_FLY=<blocks per second> moves the camera along +X, so chunks stream in and out during a run.
+    const float flySpeed = std::getenv("FAKEMC_FLY") ? std::strtof(std::getenv("FAKEMC_FLY"), nullptr) : 0.0f;
     if (const char *resize = std::getenv("FAKEMC_RESIZE")) std::sscanf(resize, "%dx%d", &resizeW, &resizeH);
     if (const char *msaa = std::getenv("FAKEMC_MSAA"); msaa && msaa[0] == '0') {
         msaaEnabled = false;
@@ -173,6 +175,10 @@ void GameObject::init() {
         }
 
         const float deltaMs = platform::deltaMs();
+        if (flySpeed != 0.0f) {
+            camera.Position.x += flySpeed * deltaMs * 0.001f;
+            cachedMatrices.dirty = true;
+        }
         keyboardCallBack(deltaMs);
         mouseCallBack();
         renderFrame();

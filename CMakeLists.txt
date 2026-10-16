@@ -18,7 +18,9 @@ find_package(Vulkan REQUIRED COMPONENTS glslc)
 
 set(DEP_BIN ${CMAKE_SOURCE_DIR}/dependencies/bin)
 set(ASSETS_DIR ${CMAKE_SOURCE_DIR}/assets)
-set(BUILD_ASSETS_DIR ${CMAKE_SOURCE_DIR}/build/assets)
+# The game runs from <dir>/game and loads assets from <dir>/assets.
+set(GAME_OUTPUT_DIR ${CMAKE_SOURCE_DIR}/build CACHE PATH "Where the playable game folder is assembled")
+set(BUILD_ASSETS_DIR ${GAME_OUTPUT_DIR}/assets)
 
 file(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS src/*.h src/*.cpp)
 
@@ -54,7 +56,7 @@ set(WINPTHREAD_DLL ${MINGW_BIN}/libwinpthread-1.dll)
 
 set_target_properties(CPP_GAME PROPERTIES
         WIN32_EXECUTABLE TRUE
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/game")
+        RUNTIME_OUTPUT_DIRECTORY "${GAME_OUTPUT_DIR}/game")
 
 # Shaders are compiled to SPIR-V next to the other runtime assets.
 file(GLOB SHADER_SOURCES CONFIGURE_DEPENDS ${ASSETS_DIR}/shaders/*.vert ${ASSETS_DIR}/shaders/*.frag)
@@ -84,9 +86,9 @@ add_custom_command(TARGET CPP_GAME POST_BUILD
 # Desktop-style shortcut with the game icon in the build folder.
 execute_powershell(
         "$ErrorActionPreference = 'Stop';
-        $s=(New-Object -COMObject WScript.Shell).CreateShortcut('${CMAKE_SOURCE_DIR}/build/CPP_GAME.lnk');
-        $s.TargetPath='${CMAKE_SOURCE_DIR}/build/game/CPP_GAME.exe';
-        $s.WorkingDirectory='${CMAKE_SOURCE_DIR}/build/game';
+        $s=(New-Object -COMObject WScript.Shell).CreateShortcut('${GAME_OUTPUT_DIR}/CPP_GAME.lnk');
+        $s.TargetPath='${GAME_OUTPUT_DIR}/game/CPP_GAME.exe';
+        $s.WorkingDirectory='${GAME_OUTPUT_DIR}/game';
         $s.IconLocation='${CMAKE_SOURCE_DIR}/assets/sprites/logo.ico';
         $s.Save()"
         OUTPUT_VARIABLE PS_OUTPUT

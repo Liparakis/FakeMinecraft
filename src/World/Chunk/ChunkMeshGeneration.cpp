@@ -3,10 +3,13 @@
 #include "ChunkGreedyMeshing.h"
 #include "Blocks.h"
 #include "Planet.h"
+#include "LoadStats.h"
 
 
 void Chunk::generateChunkMesh() {
     if (!chunkData) return;
+    loadstats::ScopedTimer timer(loadstats::meshingMicros);
+    loadstats::meshedChunks.fetch_add(1, std::memory_order_relaxed);
 
     // Work out how light spreads from glowing blocks like lava.
     computeLightMap();
@@ -17,7 +20,37 @@ void Chunk::generateChunkMesh() {
     neighborChunks[2] = Planet::planet->getChunk({chunkPos.x - 1, chunkPos.y, chunkPos.z}); // West
     neighborChunks[3] = Planet::planet->getChunk({chunkPos.x + 1, chunkPos.y, chunkPos.z}); // East
 
-    // Clear and reserve per-subchunk buffers
+    computeNeighborSkyTops();
+
+    // Everything above the highest non-air block is air, so the face passes stop there.
+    {
+        const uint8_t *raw = chunkData->data;
+        int top = 0;
+        for (int column = 0; column < static_cast<int>(CHUNK_WIDTH * CHUNK_WIDTH); ++column) {
+            const uint8_t *col = raw + column * CHUNK_HEIGHT;
+            for (int y = CHUNK_HEIGHT - 1; y >= top; --y) {
+                if (col[y] != 0) {
+                    top = y + 1;
+                    break;
+                }
+            }
+        }
+        meshTopY = top;
+    }
+
+    // Build into this thread's scratch buffers; they keep their capacity between meshes.
+    thread_local std::vector<WorldVertex> scratchWorldVertices[NUM_SUBCHUNKS];
+    thread_local std::vector<unsigned int> scratchWorldIndices[NUM_SUBCHUNKS];
+    thread_local std::vector<FluidVertex> scratchLiquidVertices[NUM_SUBCHUNKS];
+    thread_local std::vector<unsigned int> scratchLiquidIndices[NUM_SUBCHUNKS];
+    thread_local std::vector<BillboardVertex> scratchBillboardVertices[NUM_SUBCHUNKS];
+    thread_local std::vector<unsigned int> scratchBillboardIndices[NUM_SUBCHUNKS];
+    worldVertices = scratchWorldVertices;
+    worldIndices = scratchWorldIndices;
+    liquidVertices = scratchLiquidVertices;
+    liquidIndices = scratchLiquidIndices;
+    billboardVertices = scratchBillboardVertices;
+    billboardIndices = scratchBillboardIndices;
     for (int i = 0; i < NUM_SUBCHUNKS; ++i) {
         worldVertices[i].clear();
         worldIndices[i].clear();
@@ -25,15 +58,6 @@ void Chunk::generateChunkMesh() {
         liquidIndices[i].clear();
         billboardVertices[i].clear();
         billboardIndices[i].clear();
-
-        // Reserve estimates per sub-chunk (reduced due to greedy merging)
-        constexpr size_t estimatedFacesPerSub = CHUNK_WIDTH * SUBCHUNK_HEIGHT;
-        worldVertices[i].reserve(estimatedFacesPerSub * 4);
-        worldIndices[i].reserve(estimatedFacesPerSub * 6);
-        liquidVertices[i].reserve(estimatedFacesPerSub);
-        liquidIndices[i].reserve(estimatedFacesPerSub * 2);
-        billboardVertices[i].reserve(CHUNK_WIDTH * SUBCHUNK_HEIGHT / 4);
-        billboardIndices[i].reserve(CHUNK_WIDTH * SUBCHUNK_HEIGHT / 2);
     }
 
     // Per-subchunk vertex counters
@@ -50,7 +74,48 @@ void Chunk::generateChunkMesh() {
     // Generate non-solid blocks (fluids, billboards, transparent)
     generateSpecialBlocks(currentVertex, currentLiquidVertex, currentBillboardVertex);
 
+    mergeMeshes();
+    worldVertices = nullptr;
+    worldIndices = nullptr;
+    liquidVertices = nullptr;
+    liquidIndices = nullptr;
+    billboardVertices = nullptr;
+    billboardIndices = nullptr;
     generated = true;
+}
+
+void Chunk::computeNeighborSkyTops() {
+    const BlockRegistry &registry = BlockRegistry::getInstance();
+    const ChunkData *sides[4] = {northData.get(), southData.get(), westData.get(), eastData.get()};
+    for (int side = 0; side < 4; ++side) {
+        const ChunkData *data = sides[side];
+        for (int a = 0; a < static_cast<int>(CHUNK_WIDTH); ++a) {
+            int top = -1;
+            if (data) {
+                // The neighbour's border column that touches this chunk.
+                const int x = side == 0 || side == 1 ? a : (side == 2 ? CHUNK_WIDTH - 1 : 0);
+                const int z = side == 2 || side == 3 ? a : (side == 0 ? CHUNK_WIDTH - 1 : 0);
+                for (int y = CHUNK_HEIGHT - 1; y >= 0; --y) {
+                    const auto type = registry.getBlock(static_cast<uint8_t>(data->getBlock(x, y, z))).blockType;
+                    if (type == Block::SOLID || type == Block::LEAVES || type == Block::LIQUID) {
+                        top = y;
+                        break;
+                    }
+                }
+            }
+            neighborSkyTop[side][a] = static_cast<int16_t>(top);
+        }
+    }
+}
+
+uint8_t Chunk::neighborLight(const int side, const int a, const int y) const {
+    if (const Chunk *neighbor = neighborChunks[side]) {
+        const int x = side == 0 || side == 1 ? a : (side == 2 ? CHUNK_WIDTH - 1 : 0);
+        const int z = side == 2 || side == 3 ? a : (side == 0 ? CHUNK_WIDTH - 1 : 0);
+        return neighbor->getLightLevel(x, y, z);
+    }
+    // Same rule as the sky pass in computeLightMap: lit (15) down to and including the highest blocker.
+    return y >= neighborSkyTop[side][a] ? static_cast<uint8_t>(15 << 4) : 0;
 }
 
 void Chunk::generateHorizontalFaces(unsigned int* currentVertex) {
@@ -67,6 +132,8 @@ void Chunk::generateHorizontalFaces(unsigned int* currentVertex) {
     const int strideZ = CHUNK_HEIGHT;
     const int strideX = CHUNK_WIDTH * CHUNK_HEIGHT;
 
+    const MeshBlockTable &table = meshBlockTable();
+
     // Helper to build masks for a single Y slice
     auto buildMasksForY = [&](int y, bool isYMin, bool isYMax) {
          // Clear masks
@@ -80,13 +147,7 @@ void Chunk::generateHorizontalFaces(unsigned int* currentVertex) {
                  int idx = xOffset + z * strideZ + y;
                  uint8_t blockId = rawData[idx];
 
-                 if (blockId == 0) continue;
-                const Block* block = &BlockRegistry::getInstance().getBlock(blockId);
-                 
-                 // Skip non-solid blocks for greedy meshing
-                 if (block->blockType != Block::SOLID && block->blockType != Block::LEAVES) {
-                     continue;
-                 }
+                 if (!table.greedy[blockId]) continue;
 
                  // Check TOP face
                  uint8_t topBlockId;
@@ -96,13 +157,7 @@ void Chunk::generateHorizontalFaces(unsigned int* currentVertex) {
                      topBlockId = upData ? upData->getBlock(x, 0, z) : Blocks::AIR;
                  }
                  
-                 const Block* topBlockType = &BlockRegistry::getInstance().getBlock(topBlockId);
-                 if (topBlockType->blockType == Block::LEAVES ||
-                     topBlockType->blockType == Block::TRANSPARENT ||
-                     topBlockType->blockType == Block::BILLBOARD ||
-                     topBlockType->blockType == Block::LIQUID) {
-                     topMask[x][z] = blockId;
-                 }
+                 if (table.showsFace[topBlockId]) topMask[x][z] = blockId;
 
                  // Check BOTTOM face
                  uint8_t bottomBlockId;
@@ -112,20 +167,14 @@ void Chunk::generateHorizontalFaces(unsigned int* currentVertex) {
                      bottomBlockId = downData ? downData->getBlock(x, CHUNK_HEIGHT - 1, z) : Blocks::AIR;
                  }
 
-                 const Block* bottomBlockType = &BlockRegistry::getInstance().getBlock(bottomBlockId);
-                 if (bottomBlockType->blockType == Block::LEAVES ||
-                     bottomBlockType->blockType == Block::TRANSPARENT ||
-                     bottomBlockType->blockType == Block::BILLBOARD ||
-                     bottomBlockType->blockType == Block::LIQUID) {
-                     bottomMask[x][z] = blockId;
-                 }
+                 if (table.showsFace[bottomBlockId]) bottomMask[x][z] = blockId;
              }
          }
     };
 
-    for (int y = 0; y < CHUNK_HEIGHT; y++) {
+    for (int y = 0; y < meshTopY; y++) {
         int subChunkIndex = y / SUBCHUNK_HEIGHT;
-        
+
         bool isYMin = (y == 0);
         bool isYMax = (y == CHUNK_HEIGHT - 1);
 
@@ -250,6 +299,8 @@ void Chunk::generateZAxisFaces(unsigned int* currentVertex, uint16_t maskA[][CHU
     auto localData = chunkData;
     if (!localData) return;
 
+    const MeshBlockTable &table = meshBlockTable();
+
     // Direct pointer access setup
     const uint8_t* rawData = localData->data;
     const int strideZ = CHUNK_HEIGHT; // Stride for Z is just CHUNK_HEIGHT
@@ -262,7 +313,7 @@ void Chunk::generateZAxisFaces(unsigned int* currentVertex, uint16_t maskA[][CHU
         memset(processedSide, 0, sizeof(bool) * CHUNK_WIDTH * CHUNK_HEIGHT);
 
         for (int x = 0; x < CHUNK_WIDTH; x++) {
-            for (int y = 0; y < CHUNK_HEIGHT; y++) {
+            for (int y = 0; y < meshTopY; y++) {
                 uint16_t blockId = localData->getBlock(x, y, z);
                 if (blockId == 0) continue;
                 const Block* block = &BlockRegistry::getInstance().getBlock(blockId);
@@ -299,37 +350,19 @@ void Chunk::generateZAxisFaces(unsigned int* currentVertex, uint16_t maskA[][CHU
             int xOffset = x * strideX;
             int currentConstOffset = xOffset + zOffset; // Base offset for (x, *, z)
 
-            for (int y = 0; y < CHUNK_HEIGHT; y++) {
+            for (int y = 0; y < meshTopY; y++) {
                 int idx = currentConstOffset + y;
                 uint8_t blockId = rawData[idx];
 
-                if (blockId == 0) continue;
-                
-                // We know block is solid/leaves check, but let's defer that lookup if possible? 
-                // No, we need to know if we should cull self too.
-                // Optimizing: Only look up block type if ID > 0
-                const Block* block = &BlockRegistry::getInstance().getBlock(blockId);
-                if (block->blockType != Block::SOLID && block->blockType != Block::LEAVES) continue;
+                if (!table.greedy[blockId]) continue;
 
                 // --- North Neighbor (Z-1) ---
                 // Internal Z means Z-1 is in this chunk.
                 // Neighbor index = idx - strideZ
                 // Neighbor Top index = idx - strideZ + 1 (if y < MAX)
                 {
-                    int nIdx = idx - strideZ;
-                    uint8_t nBlock = rawData[nIdx];
-                    
-                    // Top block logic
-                    uint8_t nTopBlock;
-                    if (y < CHUNK_HEIGHT - 1) {
-                         nTopBlock = rawData[nIdx + 1];
-                    } else {
-                         // y is max, need upData
-                         nTopBlock = upData ? upData->getBlock(x, 0, z - 1) : Blocks::AIR;
-                    }
-                    
-                    neighbor.init(nBlock, nTopBlock);
-                    if (shouldRenderFace(neighbor, false)) maskA[x][y] = blockId;
+                    const int nIdx = idx - strideZ;
+                    if (table.showsFace[rawData[nIdx]]) maskA[x][y] = blockId;
                 }
 
                 // --- South Neighbor (Z+1) ---
@@ -337,17 +370,7 @@ void Chunk::generateZAxisFaces(unsigned int* currentVertex, uint16_t maskA[][CHU
                 // Neighbor index = idx + strideZ
                 {
                     int sIdx = idx + strideZ;
-                    uint8_t sBlock = rawData[sIdx];
-                    
-                    uint8_t sTopBlock;
-                    if (y < CHUNK_HEIGHT - 1) {
-                         sTopBlock = rawData[sIdx + 1];
-                    } else {
-                         sTopBlock = upData ? upData->getBlock(x, 0, z + 1) : Blocks::AIR;
-                    }
-
-                    neighbor.init(sBlock, sTopBlock);
-                    if (shouldRenderFace(neighbor, false)) maskB[x][y] = blockId;
+                    if (table.showsFace[rawData[sIdx]]) maskB[x][y] = blockId;
                 }
             }
         }
@@ -368,6 +391,8 @@ void Chunk::generateXAxisFaces(unsigned int* currentVertex, uint16_t maskA[][CHU
     auto localData = chunkData;
     if (!localData) return;
 
+    const MeshBlockTable &table = meshBlockTable();
+
     // Direct pointer access setup
     const uint8_t* rawData = localData->data;
     const int strideZ = CHUNK_HEIGHT;
@@ -379,7 +404,7 @@ void Chunk::generateXAxisFaces(unsigned int* currentVertex, uint16_t maskA[][CHU
         memset(processedSide, 0, sizeof(bool) * CHUNK_WIDTH * CHUNK_HEIGHT);
 
         for (int z = 0; z < CHUNK_WIDTH; z++) {
-            for (int y = 0; y < CHUNK_HEIGHT; y++) {
+            for (int y = 0; y < meshTopY; y++) {
                 uint16_t blockId = localData->getBlock(x, y, z);
                 if (blockId == 0) continue;
                 const Block* block = &BlockRegistry::getInstance().getBlock(blockId);
@@ -412,46 +437,24 @@ void Chunk::generateXAxisFaces(unsigned int* currentVertex, uint16_t maskA[][CHU
         for (int z = 0; z < CHUNK_WIDTH; z++) {
             int currentConstOffset = xOffset + z * strideZ;
 
-            for (int y = 0; y < CHUNK_HEIGHT; y++) {
+            for (int y = 0; y < meshTopY; y++) {
                 int idx = currentConstOffset + y;
                 uint8_t blockId = rawData[idx];
 
-                if (blockId == 0) continue;
-                const Block* block = &BlockRegistry::getInstance().getBlock(blockId);
-                if (block->blockType != Block::SOLID && block->blockType != Block::LEAVES) continue;
+                if (!table.greedy[blockId]) continue;
 
                 // --- West Neighbor (X-1) ---
                 // Neighbor index = idx - strideX
                 {
                     int wIdx = idx - strideX;
-                    uint8_t wBlock = rawData[wIdx];
-                    
-                    uint8_t wTopBlock;
-                    if (y < CHUNK_HEIGHT - 1) {
-                         wTopBlock = rawData[wIdx + 1];
-                    } else {
-                         wTopBlock = upData ? upData->getBlock(x - 1, 0, z) : Blocks::AIR;
-                    }
-                    
-                    neighbor.init(wBlock, wTopBlock);
-                    if (shouldRenderFace(neighbor, false)) maskA[z][y] = blockId;
+                    if (table.showsFace[rawData[wIdx]]) maskA[z][y] = blockId;
                 }
 
                 // --- East Neighbor (X+1) ---
                 // Neighbor index = idx + strideX
                 {
                     int eIdx = idx + strideX;
-                    uint8_t eBlock = rawData[eIdx];
-                    
-                    uint8_t eTopBlock;
-                    if (y < CHUNK_HEIGHT - 1) {
-                         eTopBlock = rawData[eIdx + 1];
-                    } else {
-                         eTopBlock = upData ? upData->getBlock(x + 1, 0, z) : Blocks::AIR;
-                    }
-                    
-                    neighbor.init(eBlock, eTopBlock);
-                    if (shouldRenderFace(neighbor, false)) maskB[z][y] = blockId;
+                    if (table.showsFace[rawData[eIdx]]) maskB[z][y] = blockId;
                 }
             }
         }
@@ -468,7 +471,7 @@ void Chunk::generateXAxisFaces(unsigned int* currentVertex, uint16_t maskA[][CHU
 void Chunk::greedyMergeNorthFaces(int z, uint16_t maskA[][CHUNK_HEIGHT],
                                   bool processedSide[][CHUNK_HEIGHT], unsigned int* currentVertex) {
     for (int x = 0; x < CHUNK_WIDTH; x++) {
-        for (int y = 0; y < CHUNK_HEIGHT; y++) {
+        for (int y = 0; y < meshTopY; y++) {
             if (maskA[x][y] == 0 || processedSide[x][y]) continue;
 
             uint16_t id = maskA[x][y];
@@ -477,7 +480,7 @@ void Chunk::greedyMergeNorthFaces(int z, uint16_t maskA[][CHUNK_HEIGHT],
             while (x + width < CHUNK_WIDTH && maskA[x + width][y] == id && !processedSide[x + width][y]) width++;
 
             bool canExtend = true;
-            while (y + height < CHUNK_HEIGHT && canExtend) {
+            while (y + height < meshTopY && canExtend) {
                 for (int dx = 0; dx < width; dx++) {
                     if (maskA[x + dx][y + height] != id || processedSide[x + dx][y + height]) {
                         canExtend = false; break;
@@ -496,8 +499,8 @@ void Chunk::greedyMergeNorthFaces(int z, uint16_t maskA[][CHUNK_HEIGHT],
             uint8_t light = 0;
             if (z - 1 >= 0) {
                  light = lightMap[x * CHUNK_WIDTH * CHUNK_HEIGHT + (z - 1) * CHUNK_HEIGHT + y];
-            } else if (neighborChunks[0]) { // North Neighbor
-                 light = neighborChunks[0]->getLightLevel(x, y, CHUNK_WIDTH - 1);
+            } else {
+                 light = neighborLight(0, x, y);
             }
             
             GreedyQuad quad{x, y, z, width, height, id, NORTH, light};
@@ -509,14 +512,14 @@ void Chunk::greedyMergeNorthFaces(int z, uint16_t maskA[][CHUNK_HEIGHT],
 void Chunk::greedyMergeSouthFaces(int z, uint16_t maskB[][CHUNK_HEIGHT],
                                   bool processedSide[][CHUNK_HEIGHT], unsigned int* currentVertex) {
     for (int x = 0; x < CHUNK_WIDTH; x++) {
-        for (int y = 0; y < CHUNK_HEIGHT; y++) {
+        for (int y = 0; y < meshTopY; y++) {
             if (maskB[x][y] == 0 || processedSide[x][y]) continue;
 
             uint16_t id = maskB[x][y];
             int width = 1, height = 1;
             while (x + width < CHUNK_WIDTH && maskB[x + width][y] == id && !processedSide[x + width][y]) width++;
             bool canExtend = true;
-            while (y + height < CHUNK_HEIGHT && canExtend) {
+            while (y + height < meshTopY && canExtend) {
                 for (int dx = 0; dx < width; dx++) {
                     if (maskB[x + dx][y + height] != id || processedSide[x + dx][y + height]) {
                         canExtend = false; break;
@@ -534,8 +537,8 @@ void Chunk::greedyMergeSouthFaces(int z, uint16_t maskB[][CHUNK_HEIGHT],
             uint8_t light = 0;
             if (z + 1 < (int)CHUNK_WIDTH) {
                  light = lightMap[x * CHUNK_WIDTH * CHUNK_HEIGHT + (z + 1) * CHUNK_HEIGHT + y];
-            } else if (neighborChunks[1]) { // South Neighbor
-                 light = neighborChunks[1]->getLightLevel(x, y, 0);
+            } else {
+                 light = neighborLight(1, x, y);
             }
 
             GreedyQuad quad{x, y, z, width, height, id, SOUTH, light};
@@ -547,13 +550,13 @@ void Chunk::greedyMergeSouthFaces(int z, uint16_t maskB[][CHUNK_HEIGHT],
 void Chunk::greedyMergeWestFaces(int x, uint16_t maskA[][CHUNK_HEIGHT],
                                  bool processedSide[][CHUNK_HEIGHT], unsigned int* currentVertex) {
     for (int z = 0; z < CHUNK_WIDTH; z++) {
-        for (int y = 0; y < CHUNK_HEIGHT; y++) {
+        for (int y = 0; y < meshTopY; y++) {
             if (maskA[z][y] == 0 || processedSide[z][y]) continue;
             uint16_t id = maskA[z][y];
             int width = 1, height = 1;
             while (z + width < CHUNK_WIDTH && maskA[z + width][y] == id && !processedSide[z + width][y]) width++;
             bool canExtend = true;
-            while (y + height < CHUNK_HEIGHT && canExtend) {
+            while (y + height < meshTopY && canExtend) {
                 for (int dz = 0; dz < width; dz++) {
                     if (maskA[z + dz][y + height] != id || processedSide[z + dz][y + height]) {
                         canExtend = false; break;
@@ -571,8 +574,8 @@ void Chunk::greedyMergeWestFaces(int x, uint16_t maskA[][CHUNK_HEIGHT],
             uint8_t light = 0;
             if (x - 1 >= 0) {
                  light = lightMap[(x - 1) * CHUNK_WIDTH * CHUNK_HEIGHT + z * CHUNK_HEIGHT + y];
-            } else if (neighborChunks[2]) { // West Neighbor
-                 light = neighborChunks[2]->getLightLevel(CHUNK_WIDTH - 1, y, z);
+            } else {
+                 light = neighborLight(2, z, y);
             }
             
             GreedyQuad quad{x, y, z, width, height, id, WEST, light};
@@ -584,13 +587,13 @@ void Chunk::greedyMergeWestFaces(int x, uint16_t maskA[][CHUNK_HEIGHT],
 void Chunk::greedyMergeEastFaces(int x, uint16_t maskB[][CHUNK_HEIGHT],
                                  bool processedSide[][CHUNK_HEIGHT], unsigned int* currentVertex) {
     for (int z = 0; z < CHUNK_WIDTH; z++) {
-        for (int y = 0; y < CHUNK_HEIGHT; y++) {
+        for (int y = 0; y < meshTopY; y++) {
             if (maskB[z][y] == 0 || processedSide[z][y]) continue;
             uint16_t id = maskB[z][y];
             int width = 1, height = 1;
             while (z + width < CHUNK_WIDTH && maskB[z + width][y] == id && !processedSide[z + width][y]) width++;
             bool canExtend = true;
-            while (y + height < CHUNK_HEIGHT && canExtend) {
+            while (y + height < meshTopY && canExtend) {
                 for (int dz = 0; dz < width; dz++) {
                     if (maskB[z + dz][y + height] != id || processedSide[z + dz][y + height]) {
                         canExtend = false; break;
@@ -608,8 +611,8 @@ void Chunk::greedyMergeEastFaces(int x, uint16_t maskB[][CHUNK_HEIGHT],
             uint8_t light = 0;
             if (x + 1 < (int)CHUNK_WIDTH) {
                  light = lightMap[(x + 1) * CHUNK_WIDTH * CHUNK_HEIGHT + z * CHUNK_HEIGHT + y];
-            } else if (neighborChunks[3]) {
-                 light = neighborChunks[3]->getLightLevel(0, y, z);
+            } else {
+                 light = neighborLight(3, z, y);
             }
             
             GreedyQuad quad{x, y, z, width, height, id, EAST, light};
@@ -629,9 +632,11 @@ void Chunk::generateSpecialBlocks(unsigned int* currentVertex, unsigned int* cur
     const int strideZ = CHUNK_HEIGHT;
     const int strideX = CHUNK_WIDTH * CHUNK_HEIGHT;
 
+    const MeshBlockTable &table = meshBlockTable();
+
     auto processSpecialBlock = [&](int x, int y, int z, int idx) {
         uint8_t blockId = rawData[idx];
-        if (blockId == 0) return;
+        if (blockId == 0 || table.greedy[blockId]) return;
 
         int subChunkIndex = y / SUBCHUNK_HEIGHT;
         const Block *block = &BlockRegistry::getInstance().getBlock(blockId);
@@ -684,16 +689,16 @@ void Chunk::generateSpecialBlocks(unsigned int* currentVertex, unsigned int* cur
         // Helper to get light at neighbor
         auto getNeighborLight = [&](int nx, int ny, int nz, int nDir) -> uint8_t {
              if (nx < 0) {
-                 return neighborChunks[2] ? neighborChunks[2]->getLightLevel(CHUNK_WIDTH - 1, ny, nz) : 0;
+                 return neighborLight(2, nz, ny);
              }
              if (nx >= CHUNK_WIDTH) {
-                 return neighborChunks[3] ? neighborChunks[3]->getLightLevel(0, ny, nz) : 0;
+                 return neighborLight(3, nz, ny);
              }
              if (nz < 0) {
-                 return neighborChunks[0] ? neighborChunks[0]->getLightLevel(nx, ny, CHUNK_WIDTH - 1) : 0;
+                 return neighborLight(0, nx, ny);
              }
              if (nz >= CHUNK_WIDTH) {
-                 return neighborChunks[1] ? neighborChunks[1]->getLightLevel(nx, ny, 0) : 0;
+                 return neighborLight(1, nx, ny);
              }
              if (ny < 0 || ny >= CHUNK_HEIGHT) return 0; // Or Skylight 15 if > max?
              return lightMap[nx * CHUNK_WIDTH * CHUNK_HEIGHT + nz * CHUNK_HEIGHT + ny];
@@ -794,7 +799,7 @@ void Chunk::generateSpecialBlocks(unsigned int* currentVertex, unsigned int* cur
             int zOffset = z * strideZ;
             int baseIdx = xOffset + zOffset;
             
-            for (int y = 0; y < CHUNK_HEIGHT; y++) {
+            for (int y = 0; y < meshTopY; y++) {
                 processSpecialBlock(x, y, z, baseIdx + y);
             }
         }

@@ -11,7 +11,9 @@
 #include "ChunkPos.h"
 #include "ChunkData.h"
 #include "WorldConstants.h"
+#include <atomic>
 #include <memory>
+#include <mutex>
 
 constexpr int SUBCHUNK_HEIGHT = 16;
 constexpr int NUM_SUBCHUNKS = 16; // CHUNK_HEIGHT / SUBCHUNK_HEIGHT
@@ -82,7 +84,9 @@ public:
     // ========================================================================
     // RENDERING (ChunkRendering.cpp)
     // ========================================================================
-    void uploadMesh();
+    /// Uploads the merged mesh built by generateChunkMesh. Render thread only; skips the
+    /// frame (returns false) if a worker is meshing this chunk right now.
+    bool uploadMesh();
     // Helper functions to draw everything in the chunk at once.
     void renderAllSolid();
     void renderAllBillboard() const;
@@ -124,8 +128,16 @@ public:
     std::shared_ptr<ChunkData> eastData{};
     std::shared_ptr<ChunkData> westData{};
     ChunkPos chunkPos;
-    bool ready;
-    bool generated;
+    std::atomic<bool> ready;     ///< The GPU mesh matches the latest generated mesh.
+    std::atomic<bool> generated; ///< A mesh has been generated and waits in the merged buffers.
+    std::atomic<bool> meshRequested{false}; ///< A mesh job is queued or done; set once its neighbours are lit.
+
+    /// Held while the chunk is meshed, uploaded or reset; never acquire it while holding Planet::chunkMutex.
+    std::mutex meshMutex;
+
+    /// Whether lava light reaches each border (0 North, 1 South, 2 West, 3 East). Neighbours only
+    /// need a remesh when this chunk arrives if it is set, since sky light is derived from block data.
+    std::atomic<bool> borderBlockLight[4] = {};
     size_t listIndex = 0; // For O(1) removal from Planet::chunkList
     float cachedDistSq = 0.0f;  // Cached distance squared for sorting (updated once per frame)
 
@@ -150,11 +162,34 @@ private:
     // 0: North (-Z), 1: South (+Z), 2: West (-X), 3: East (+X)
     const Chunk* neighborChunks[4] = { nullptr, nullptr, nullptr, nullptr };
 
-    // Temporary buffers per sub-chunk (used during generation, cleared after upload)
-    std::vector<WorldVertex> worldVertices[NUM_SUBCHUNKS];
-    std::vector<unsigned int> worldIndices[NUM_SUBCHUNKS];
-    std::vector<FluidVertex> liquidVertices[NUM_SUBCHUNKS];
-    std::vector<unsigned int> liquidIndices[NUM_SUBCHUNKS];
-    std::vector<BillboardVertex> billboardVertices[NUM_SUBCHUNKS];
-    std::vector<unsigned int> billboardIndices[NUM_SUBCHUNKS];
+    /// Concatenates the sub-chunk buffers into the merged ones and frees the sub-chunk buffers.
+    void mergeMeshes();
+
+    // Merged geometry from the last generateChunkMesh, waiting for uploadMesh (freed after upload).
+    std::vector<WorldVertex> mergedWorldVertices;
+    std::vector<BillboardVertex> mergedBillboardVertices;
+    std::vector<FluidVertex> mergedWaterVertices;
+    std::vector<uint32_t> mergedWorldIndices, mergedBillboardIndices, mergedWaterIndices;
+    float meshMinY = 0.0f, meshMaxY = 0.0f;
+
+    // Per-sub-chunk build buffers. They point at the meshing thread's scratch arrays (see
+    // generateChunkMesh), so their capacity is reused instead of reallocated for every mesh.
+    std::vector<WorldVertex> *worldVertices = nullptr;
+    std::vector<unsigned int> *worldIndices = nullptr;
+    std::vector<FluidVertex> *liquidVertices = nullptr;
+    std::vector<unsigned int> *liquidIndices = nullptr;
+    std::vector<BillboardVertex> *billboardVertices = nullptr;
+    std::vector<unsigned int> *billboardIndices = nullptr;
+
+    /// Highest sky-blocking block in each border column of a neighbour that has no Chunk yet
+    /// (0 North, 1 South, 2 West, 3 East); -1 when nothing in the column blocks the sky.
+    int16_t neighborSkyTop[4][CHUNK_WIDTH] = {};
+    /// One past the highest non-air block; face passes skip the air above it.
+    int meshTopY = CHUNK_HEIGHT;
+    void computeNeighborSkyTops();
+
+    /// Light just across border `side` at (a, y), where `a` runs along the border (x for N/S, z for W/E).
+    /// Uses the neighbour's light map when it exists, otherwise its sky light derived from block data
+    /// (identical to what the neighbour computes itself; only its lava light is unknown).
+    [[nodiscard]] uint8_t neighborLight(int side, int a, int y) const;
 };

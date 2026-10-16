@@ -13,6 +13,7 @@
 #include <thread>
 #include <shared_mutex>
 #include <atomic>
+#include <chrono>
 #include <memory_resource>
 
 #include "ChunkPos.h"
@@ -114,9 +115,16 @@ private:
     /** @} */
 
     /** @name Background Tasks @{ */
-    void processChunkDataQueue();
-    void processChunkQueue();
-    void processRegenQueue();
+    /// Moves queued builds and remeshes into the worker pool. Returns false when there was nothing to do.
+    bool dispatchWork();
+    /// Worker job: fetch (or generate) block data for a chunk and its neighbours, mesh it, publish it.
+    void buildChunk(ChunkPos chunkPos);
+    /// Worker job: (re)build an existing chunk's mesh, recomputing its light from lit neighbours.
+    void remeshChunk(ChunkPos chunkPos);
+    /// True when every horizontal neighbour is lit or outside the render distance. Needs chunkMutex.
+    [[nodiscard]] bool neighborsLit(ChunkPos pos) const;
+    /// Queues the chunk's first mesh once its neighbours are lit. Needs chunkMutex (exclusive).
+    void requestMeshIfReady(Chunk *chunk);
     bool populateChunkData(Chunk* chunk, const ChunkPos& chunkPos);
     std::shared_ptr<ChunkData> getOrCreateChunkData(const ChunkPos& pos);
     /** @} */
@@ -147,7 +155,7 @@ private:
      * @{
      */
     std::queue<ChunkPos> chunkQueue;     ///< Chunks that need to be created.
-    std::queue<ChunkPos> chunkDataQueue; ///< Chunks that need our noise algorithm to run.
+    std::unordered_set<ChunkPos, ChunkPosHash> inFlight; ///< Chunks currently being built by a worker.
     std::queue<ChunkPos> regenQueue;    ///< Chunks that need their 3D mesh rebuilt.
     std::unordered_set<ChunkPos, ChunkPosHash> regenPending; ///< Dedupes regenQueue so a chunk is remeshed once per batch of neighbour loads.
     std::atomic<unsigned int> chunksLoading{0}; ///< How many things are currently loading.
@@ -163,7 +171,9 @@ private:
     std::atomic<bool> shouldEnd{false};        ///< A flag to tell the threads to stop.
 
     Frustum frustum;                           ///< Used to see what's actually in front of the camera.
-    ThreadPool chunkGenPool;                   ///< A pool of threads to generate world data in parallel.
+    /// Generates and meshes chunks in parallel; two hardware threads stay free for rendering and dispatch.
+    ThreadPool chunkGenPool{std::max(1u, std::thread::hardware_concurrency() - 2)};
+    static constexpr int MAX_UPLOADS_PER_FRAME = 24;
     int visibleCount = 0;
     /** @} */
 
@@ -178,6 +188,13 @@ private:
     std::vector<Chunk*> frustumVisibleChunks;
     std::vector<ChunkPos> toDeleteList;
     std::vector<Chunk*> shadowCasters;         ///< Scratch list for the shadow pass.
+
+    /** @name Load timing (see LoadStats.h) @{ */
+    static constexpr int NEAR_RADIUS = 4;      ///< The 9x9 chunks around the camera count as "nearby".
+    std::chrono::steady_clock::time_point loadStart;
+    bool nearReported = false, allReported = false;
+    void reportLoadProgress(int readyNear, int readyChunks);
+    /** @} */
     std::vector<Chunk*> reflectedChunks;       ///< Scratch list for the reflection pass.
 
     std::vector<Chunk*> chunkPool;             ///< A place where we put old chunks so we can reuse them.

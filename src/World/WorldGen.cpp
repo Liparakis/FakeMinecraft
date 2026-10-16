@@ -4,6 +4,7 @@
 #include <random>
 #include <cstring>
 #include <algorithm>
+#include <array>
 #include "Blocks.h"
 #include "Planet.h"
 #include "ChunkPos.h"
@@ -299,6 +300,14 @@ void WorldGen::generateChunkData(const ChunkPos chunkPos, uint8_t *chunkData, co
     constexpr int STEEP_SLOPE = 4;
     constexpr int SNOW_LINE = 172;
 
+    // How much harder it is for a cave to open at each depth below a land surface (0 from 10 down).
+    constexpr int SEAL_DEPTH = 10;
+    static const auto landSeal = [] {
+        std::array<float, SEAL_DEPTH + 1> seal{};
+        for (int d = 0; d <= SEAL_DEPTH; ++d) seal[d] = 0.45f * (1.0f - terrain::smoothstep(0.0f, 10.0f, static_cast<float>(d)));
+        return seal;
+    }();
+
     for (int x = 0; x < CHUNK_WIDTH; ++x) {
         for (int z = 0; z < CHUNK_WIDTH; ++z) {
             const int surfaceY = cache.surfaceHeight[x][z];
@@ -323,38 +332,35 @@ void WorldGen::generateChunkData(const ChunkPos chunkPos, uint8_t *chunkData, co
                 PREFETCH(&chunkData[x * CHUNK_WIDTH * CHUNK_HEIGHT + (z + 1) * CHUNK_HEIGHT], 1, 1);
             }
 
-            for (int y = 0; y < CHUNK_HEIGHT; ++y) {
+            // The column is filled in spans: bedrock, ground (with caves), water, then air.
+            uint8_t *column = chunkData + baseIndex;
+            const int height = static_cast<int>(CHUNK_HEIGHT);
+            const int bedrockEnd = std::clamp(1 - startY, 0, height);           // worldY <= 0
+            const int groundEnd = std::clamp(surfaceY + 1 - startY, bedrockEnd, height);
+            const int waterEnd = std::clamp(WATER_LEVEL + 1 - startY, groundEnd, height);
+
+            std::memset(column, Blocks::BEDROCK, bedrockEnd);
+            for (int y = bedrockEnd; y < groundEnd; ++y) {
                 const int worldY = y + startY;
-                const int index = baseIndex + y;
-
-                if (worldY <= 0) [[unlikely]] {
-                    chunkData[index] = Blocks::BEDROCK;
-                    continue;
-                }
-
-                if (worldY > surfaceY) [[likely]] {
-                    if (worldY > WATER_LEVEL) chunkData[index] = Blocks::AIR;
-                    else chunkData[index] = (worldY == WATER_LEVEL && biome->frozenWater) ? Blocks::ICE : Blocks::WATER;
-                    continue;
-                }
+                const int depth = surfaceY - worldY;
 
                 // Caves rarely breach the surface and never open into the sea floor.
-                const int depth = surfaceY - worldY;
-                const float surfaceSeal = underwater ? (depth < 6 ? 1.0f : 0.0f)
-                                                     : 0.45f * (1.0f - terrain::smoothstep(0.0f, 10.0f, static_cast<float>(depth)));
+                const float surfaceSeal = underwater ? (depth < 6 ? 1.0f : 0.0f) : landSeal[std::min(depth, SEAL_DEPTH)];
                 if (caveNoise.get(x, y, z) > caveSettings.chance + surfaceSeal) [[unlikely]] {
-                    chunkData[index] = Blocks::AIR;
-                    continue;
-                }
-
-                if (biome->terracottaBands && !underwater && depth < 24 && (depth > 0 || steep)) {
-                    chunkData[index] = terracottaBand(worldY);
+                    column[y] = Blocks::AIR;
+                } else if (biome->terracottaBands && !underwater && depth < 24 && (depth > 0 || steep)) {
+                    column[y] = terracottaBand(worldY);
                 } else if (depth == 0) {
-                    chunkData[index] = top;
+                    column[y] = top;
                 } else {
-                    chunkData[index] = (depth < biome->underDepth) ? under : Blocks::STONE;
+                    column[y] = (depth < biome->underDepth) ? under : Blocks::STONE;
                 }
             }
+            if (waterEnd > groundEnd) {
+                std::memset(column + groundEnd, Blocks::WATER, waterEnd - groundEnd);
+                if (biome->frozenWater && WATER_LEVEL - startY == waterEnd - 1) column[waterEnd - 1] = Blocks::ICE;
+            }
+            std::memset(column + waterEnd, Blocks::AIR, height - waterEnd);
         }
     }
 

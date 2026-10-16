@@ -7,6 +7,27 @@
 #include "Blocks.h"
 
 // Group neighbors to avoid repeating the same code.
+/// Meshing properties per block id, built once from the registry (after Blocks::init).
+/// Replaces two registry lookups per neighbour test in the mesher's hot loops.
+struct MeshBlockTable {
+    bool greedy[256] = {};    ///< SOLID or LEAVES: meshed by the greedy face passes.
+    bool showsFace[256] = {}; ///< LEAVES, TRANSPARENT, BILLBOARD or LIQUID: a solid face next to it is visible.
+};
+
+inline const MeshBlockTable &meshBlockTable() {
+    static const MeshBlockTable table = [] {
+        MeshBlockTable t;
+        const auto &blocks = BlockRegistry::getInstance().getAllBlocks();
+        for (const Block &b : blocks) {
+            t.greedy[b.id] = b.blockType == Block::SOLID || b.blockType == Block::LEAVES;
+            t.showsFace[b.id] = b.blockType == Block::LEAVES || b.blockType == Block::TRANSPARENT ||
+                                b.blockType == Block::BILLBOARD || b.blockType == Block::LIQUID;
+        }
+        return t;
+    }();
+    return table;
+}
+
 struct NeighborData {
     int block;
     int topBlock;

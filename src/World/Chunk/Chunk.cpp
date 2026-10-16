@@ -42,7 +42,16 @@ void Chunk::reset(ChunkPos newPos) {
         chunkThread.join();
     }
 
+    // Waits for any worker still meshing this chunk under its old position.
+    std::lock_guard meshLock(meshMutex);
+    meshRequested = false;
     releaseMeshes();
+    std::vector<WorldVertex>().swap(mergedWorldVertices);
+    std::vector<BillboardVertex>().swap(mergedBillboardVertices);
+    std::vector<FluidVertex>().swap(mergedWaterVertices);
+    std::vector<uint32_t>().swap(mergedWorldIndices);
+    std::vector<uint32_t>().swap(mergedBillboardIndices);
+    std::vector<uint32_t>().swap(mergedWaterIndices);
 
     // Reset position and state
     chunkPos = newPos;
@@ -84,12 +93,6 @@ void Chunk::reset(ChunkPos newPos) {
 
     // Clear vertex buffers
     for (int i = 0; i < NUM_SUBCHUNKS; ++i) {
-        worldVertices[i].clear();
-        worldIndices[i].clear();
-        billboardVertices[i].clear();
-        billboardIndices[i].clear();
-        liquidVertices[i].clear();
-        liquidIndices[i].clear();
     }
 }
 
@@ -100,12 +103,8 @@ uint16_t Chunk::getBlockAtPos(int x, int y, int z) const {
 void Chunk::updateBlock(int x, int y, int z, uint8_t newBlock) {
     chunkData->setBlock(x, y, z, newBlock);
 
-    // Regenerate mesh data
-    generateChunkMesh();
-
-    // Planet::prepare uploads it next frame; the old mesh draws until then.
-    ready = false;
-    generated = true;
+    // Planet::prepare uploads the new mesh next frame; the old mesh draws until then.
+    updateChunk();
 
     // Update neighboring chunks if at boundaries
     if (x == 0) {
@@ -134,7 +133,7 @@ void Chunk::updateBlock(int x, int y, int z, uint8_t newBlock) {
 }
 
 void Chunk::updateChunk() {
+    std::lock_guard meshLock(meshMutex);
     generateChunkMesh();
     ready = false;
-    generated = true;
 }
