@@ -52,6 +52,8 @@ namespace {
             case PipelineId::ShadowBillboard: return {"shadow_billboard.vert", nullptr, VertexLayout::BillboardPosition, TRI, VK_CULL_MODE_NONE, true, true, VK_COMPARE_OP_LESS, Blend::None, true};
             case PipelineId::UI: return {"ui.vert", "ui.frag", VertexLayout::UI, TRI, VK_CULL_MODE_NONE, false, false, GE, Blend::Alpha, false};
             case PipelineId::Lod: return {"lod.vert", "lod.frag", VertexLayout::Lod, TRI, VK_CULL_MODE_NONE, true, true, GE, Blend::None, false};
+            case PipelineId::Fxaa: return {"fxaa.vert", "fxaa.frag", VertexLayout::None, TRI, VK_CULL_MODE_NONE, false, false, GE, Blend::None, false};
+            case PipelineId::LodWater: return {"lod.vert", "lod_water.frag", VertexLayout::Lod, TRI, VK_CULL_MODE_NONE, true, true, GE, Blend::Alpha, false};
         }
         throw std::runtime_error("[Renderer] unknown pipeline");
     }
@@ -240,12 +242,27 @@ void Renderer::createTargets() {
                                   VK_SAMPLE_COUNT_4_BIT);
     depth = ctx().createImage(size, DEPTH_FORMAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                               VK_IMAGE_ASPECT_DEPTH_BIT);
+    sceneColor = ctx().createImage(size, ctx().swapchainFormat,
+                                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                   VK_IMAGE_ASPECT_COLOR_BIT);
+    if (sceneSet) writeSceneSet();
+}
+
+void Renderer::writeSceneSet() {
+    const VkDescriptorImageInfo info{linearClamp, sceneColor.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = sceneSet;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &info;
+    vkUpdateDescriptorSets(ctx().device, 1, &write, 0, nullptr);
 }
 
 void Renderer::destroyTargets() {
     ctx().destroyImage(msaaColor);
     ctx().destroyImage(msaaDepth);
     ctx().destroyImage(depth);
+    ctx().destroyImage(sceneColor);
 }
 
 void Renderer::createDescriptors() {
@@ -290,6 +307,15 @@ void Renderer::createDescriptors() {
         check(vkAllocateDescriptorSets(device, &alloc, sets), "vkAllocateDescriptorSets");
         frame.mainSet = sets[0];
         frame.reflectionSet = sets[1];
+    }
+
+    {
+        VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        alloc.descriptorPool = descriptorPool;
+        alloc.descriptorSetCount = 1;
+        alloc.pSetLayouts = &textureSetLayout;
+        check(vkAllocateDescriptorSets(device, &alloc, &sceneSet), "vkAllocateDescriptorSets");
+        writeSceneSet();
     }
 
     const VkDescriptorSetLayout setLayouts[2] = {frameSetLayout, textureSetLayout};
@@ -755,6 +781,12 @@ void Renderer::beginMainPass(const glm::vec3 &clearColor) {
     imageBarrier(cmd, ctx().swapchainImage(), VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                  VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    if (fxaa) {
+        imageBarrier(cmd, sceneColor.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_NONE,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    }
+    const VkImageView output = fxaa ? sceneColor.view : ctx().swapchainView();
     if (msaa) {
         imageBarrier(cmd, msaaColor.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -769,14 +801,14 @@ void Renderer::beginMainPass(const glm::vec3 &clearColor) {
                  VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 
     VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    color.imageView = msaa ? msaaColor.view : ctx().swapchainView();
+    color.imageView = msaa ? msaaColor.view : output;
     color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     color.storeOp = msaa ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
     color.clearValue.color = {{clearColor.r, clearColor.g, clearColor.b, 1.0f}};
     if (msaa) {
         color.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
-        color.resolveImageView = ctx().swapchainView();
+        color.resolveImageView = output;
         color.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
 
@@ -802,7 +834,7 @@ void Renderer::beginUIPass() {
     VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     color.imageView = ctx().swapchainView();
     color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    color.loadOp = fxaa ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_LOAD; // FXAA writes every pixel.
     color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 
     VkRenderingInfo info{VK_STRUCTURE_TYPE_RENDERING_INFO};
@@ -813,6 +845,13 @@ void Renderer::beginUIPass() {
     target = Target::UI;
     targetSamples = VK_SAMPLE_COUNT_1_BIT;
     beginRendering(info, ctx().swapchainExtent, false);
+
+    if (fxaa) {
+        bindPipeline(PipelineId::Fxaa);
+        vkCmdBindDescriptorSets(ctx().cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 1, 1, &sceneSet, 0, nullptr);
+        vkCmdDraw(ctx().cmd(), 3, 1, 0, 0);
+        mark("fxaa");
+    }
 }
 
 void Renderer::endPass() {
@@ -832,6 +871,12 @@ void Renderer::endPass() {
                      VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     } else if (target == Target::Main) {
+        if (fxaa) {
+            imageBarrier(cmd, sceneColor.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        }
         // The UI pass loads what the main pass resolved into the swapchain image.
         imageBarrier(cmd, ctx().swapchainImage(), VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,

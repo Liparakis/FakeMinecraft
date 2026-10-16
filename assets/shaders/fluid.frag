@@ -17,7 +17,10 @@ float calculateShadow(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
     if (projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0)
         return 0.0;
     float bias = max(0.005 * (1.0 - dot(normal, lightDir)), 0.0005);
-    return 1.0 - sampleShadowLight(projCoords.xy, projCoords.z - bias);
+    float shadow = 1.0 - sampleShadowLight(projCoords.xy, projCoords.z - bias);
+    // Fade out toward the shadow map's edge like terrain does (terrainShadow), or the edge shows as a line.
+    vec2 edge = abs(projCoords.xy * 2.0 - 1.0);
+    return shadow * (1.0 - smoothstep(0.8, 1.0, max(edge.x, edge.y)));
 }
 
 void main() {

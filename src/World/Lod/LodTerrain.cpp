@@ -12,9 +12,9 @@ namespace {
     constexpr int SNOW_LINE = 172;       ///< Matches WorldGen: peaks above this are snow-capped.
     /// A tile splits while the camera is closer than this many tile sizes. A cell then spans about
     /// focal / (CELLS * SPLIT_FACTOR) pixels at any distance: ~4 px at 720p and a 70 degree FOV.
-    constexpr float SPLIT_FACTOR = 4.0f;
+    constexpr float SPLIT_FACTOR = 4.0f; // With tileSize(1), sets LOD_NEAR_EXTENT in common.glsl.
     constexpr float REFLECTION_SPLIT_FACTOR = 1.0f; ///< ~16x fewer tiles than the main view.
-    /// Opacity of real water: TextureManager raises the water texture's alpha to 180 (LOD_WATER_ALPHA in common.glsl).
+    /// Opacity of real water: TextureManager raises the water texture's alpha to 180 (FrameUniforms::lodWaterColor.a).
     constexpr float WATER_ALPHA = 180.0f / 255.0f;
     constexpr size_t MAX_PENDING = 24;   ///< Tiles being built at once.
     constexpr size_t MAX_UPLOADS_PER_FRAME = 8;
@@ -44,7 +44,7 @@ LodTerrain::~LodTerrain() {
 
 void LodTerrain::init() {
     using namespace Blocks;
-    // lod.frag adds the sky reflection, as fluid.frag does for real water.
+    // The shaders shade distant water with real water's model (FrameUniforms::lodWaterColor).
     setColor(waterColor, TextureManager::getInstance().averageColor(TextureManager::getInstance().getLayerIndex("water_still")));
     setColor(iceColor, topColor(ICE));
     setColor(snowColor, topColor(SNOW));
@@ -243,6 +243,21 @@ void LodTerrain::addToCut(const TileKey &key, Cut &cut) {
     tiles[key].lastUsed = frame;
 }
 
+void LodTerrain::renderWater(const Frustum &frustum) const {
+    if (!active || view.list.empty()) return;
+    Renderer &renderer = Renderer::get();
+    renderer.bindPipeline(PipelineId::LodWater);
+    for (const TileKey &key : view.list) {
+        if (key.level != 0) continue;
+        const Tile &tile = tiles.at(key);
+        if (frustum.isBoxVisible(tile.center, tile.extents)) renderer.draw(tile.mesh);
+    }
+}
+
+glm::vec4 LodTerrain::waterUniform() const {
+    return glm::vec4(glm::vec3(waterColor[0], waterColor[1], waterColor[2]) / 255.0f, WATER_ALPHA);
+}
+
 void LodTerrain::render(const Frustum &frustum, const bool reflection) const {
     const std::vector<TileKey> &list = reflection ? this->reflection.list : view.list;
     if (!active || list.empty()) return;
@@ -274,6 +289,7 @@ LodTerrain::BuiltTile LodTerrain::build(const TileKey &key, const long seed) con
         int surface;  ///< Drawn top: ground, water level or forest canopy.
         bool water;   ///< Liquid surface (not ice); shaded like real water.
         uint8_t top[3], wall[3];
+        uint8_t floor[3]; ///< Sea floor under water.
     };
     thread_local Cell grid[G][G];
 
@@ -305,13 +321,8 @@ LodTerrain::BuiltTile LodTerrain::build(const TileKey &key, const long seed) con
             copy(cell.wall, slope >= 4 ? style.steep : style.top);
             if (cell.ground < WATER_LEVEL) {
                 cell.surface = WATER_LEVEL;
-                copy(cell.top, style.frozen ? iceColor : waterColor);
-                // Real water is translucent: the sea floor shows through, as if blended under it.
-                if (cell.water) {
-                    for (int c = 0; c < 3; ++c) {
-                        cell.top[c] = static_cast<uint8_t>(waterColor[c] * WATER_ALPHA + style.floor[c] * (1.0f - WATER_ALPHA));
-                    }
-                }
+                // Water's colour comes from the shaders; its vertices carry the sea floor seen through it.
+                copy(cell.top, style.frozen ? iceColor : style.floor);
             } else if (cell.ground >= SNOW_LINE) {
                 copy(cell.top, snowColor);
                 copy(cell.wall, snowColor);
@@ -329,11 +340,10 @@ LodTerrain::BuiltTile LodTerrain::build(const TileKey &key, const long seed) con
             const int wx = static_cast<int>(std::floor(originX / spacing)) + i, wz = static_cast<int>(std::floor(originZ / spacing)) + j;
             const uint32_t hash = (static_cast<uint32_t>(wx) * 73856093u) ^ (static_cast<uint32_t>(wz) * 19349663u) ^ (static_cast<uint32_t>(key.level) * 83492791u);
             const float shade = 0.93f + 0.14f * static_cast<float>((hash * 2654435761u) >> 24) / 255.0f;
-            if (cell.ground >= WATER_LEVEL) {
-                for (int c = 0; c < 3; ++c) {
-                    cell.top[c] = static_cast<uint8_t>(std::min(255.0f, cell.top[c] * shade));
-                    cell.wall[c] = static_cast<uint8_t>(std::min(255.0f, cell.wall[c] * shade));
-                }
+            for (int c = 0; c < 3; ++c) {
+                cell.top[c] = static_cast<uint8_t>(std::min(255.0f, cell.top[c] * shade));
+                cell.wall[c] = static_cast<uint8_t>(std::min(255.0f, cell.wall[c] * shade));
+                cell.floor[c] = static_cast<uint8_t>(std::min(255.0f, style.floor[c] * shade));
             }
         }
     }
@@ -353,6 +363,7 @@ LodTerrain::BuiltTile LodTerrain::build(const TileKey &key, const long seed) con
     };
 
     const float s = static_cast<float>(spacing);
+    const uint8_t waterKind = key.level == 0 ? WATER_NEAR : WATER_TOP;
     const float skirt = 2.0f * s; // Tile edges hang down a little so neighbouring LODs never show cracks.
     for (int i = 1; i <= CELLS; ++i) {
         // Top faces, merged along z while the height and colour stay the same.
@@ -364,7 +375,7 @@ LodTerrain::BuiltTile LodTerrain::build(const TileKey &key, const long seed) con
             const float x0 = originX + (i - 1) * s, x1 = x0 + s;
             const float z0 = originZ + (j - 1) * s, z1 = z0 + run * s;
             const float y = static_cast<float>(cell.surface + 1);
-            quad({x0, y, z0}, {x1, y, z0}, {x1, y, z1}, {x0, y, z1}, cell.top, cell.water ? WATER_TOP : TOP);
+            quad({x0, y, z0}, {x1, y, z0}, {x1, y, z1}, {x0, y, z1}, cell.top, cell.water ? waterKind : TOP);
             j += run;
         }
 
@@ -376,22 +387,62 @@ LodTerrain::BuiltTile LodTerrain::build(const TileKey &key, const long seed) con
             const float top = static_cast<float>(cell.surface + 1);
             auto wall = [&](const int ni, const int nj, const bool edge, const uint8_t direction) {
                 const float neighborTop = static_cast<float>(grid[ni][nj].surface + 1);
-                const float bottom = edge ? std::min(top, neighborTop) - skirt : neighborTop;
-                if (bottom >= top) return;
+                // Skirts must not hang under water, where they show through the edge of the real water.
+                // Water tiles are all flat at one height, so a sliver covers their hairline cracks.
+                float bottom = edge ? std::min(top, neighborTop) - (cell.water ? 0.25f : skirt) : neighborTop;
+                if (edge && !cell.water && grid[ni][nj].water) bottom = std::max(bottom, static_cast<float>(WATER_LEVEL + 1));
+                // Opaque water has no sea floor mesh: at its edges, wall it down to the sea floor (shaded as one),
+                // so looking through near water you don't see under it.
+                const bool floorWall = edge && cell.water && waterKind == WATER_TOP;
+                if (floorWall) bottom = static_cast<float>(cell.ground + 1);
+                // Its top stays just under the reflection's clip plane (Planet::REFLECTION_CLIP_PLANE), or the
+                // reflection mirrors it as a line on every tile edge.
+                const float wallTop = floorWall ? static_cast<float>(WATER_LEVEL) + 0.5f : top;
+                if (bottom >= wallTop) return;
                 // Water skirts are shaded like the surface, or tile seams show as dark dots.
-                const auto &color = cell.water ? cell.top : cell.wall;
-                const uint8_t shade = cell.water ? WATER_TOP : direction;
+                const auto &color = floorWall ? cell.floor : cell.water ? cell.top : cell.wall;
+                const uint8_t shade = floorWall ? TOP : cell.water ? waterKind : direction;
                 switch (direction) {
-                    case WEST: quad({x0, bottom, z0}, {x0, top, z0}, {x0, top, z1}, {x0, bottom, z1}, color, shade); break;
-                    case EAST: quad({x1, bottom, z1}, {x1, top, z1}, {x1, top, z0}, {x1, bottom, z0}, color, shade); break;
-                    case NORTH: quad({x1, bottom, z0}, {x1, top, z0}, {x0, top, z0}, {x0, bottom, z0}, color, shade); break;
-                    default: quad({x0, bottom, z1}, {x0, top, z1}, {x1, top, z1}, {x1, bottom, z1}, color, shade); break;
+                    case WEST: quad({x0, bottom, z0}, {x0, wallTop, z0}, {x0, wallTop, z1}, {x0, bottom, z1}, color, shade); break;
+                    case EAST: quad({x1, bottom, z1}, {x1, wallTop, z1}, {x1, wallTop, z0}, {x1, bottom, z0}, color, shade); break;
+                    case NORTH: quad({x1, bottom, z0}, {x1, wallTop, z0}, {x0, wallTop, z0}, {x0, bottom, z0}, color, shade); break;
+                    default: quad({x0, bottom, z1}, {x0, wallTop, z1}, {x1, wallTop, z1}, {x1, bottom, z1}, color, shade); break;
                 }
             };
             wall(i - 1, j, i == 1, WEST);
             wall(i + 1, j, i == CELLS, EAST);
             wall(i, j - 1, j == 1, NORTH);
             wall(i, j + 1, j == CELLS, SOUTH);
+        }
+    }
+
+    // Next to the real chunks you look through their translucent water and under this tile's surface,
+    // so the nearest tiles also get a sea floor, with walls where it steps up (toward shores).
+    if (key.level == 0) {
+        for (int i = 1; i <= CELLS; ++i) {
+            for (int j = 1; j <= CELLS; ++j) {
+                const Cell &cell = grid[i][j];
+                if (cell.ground >= WATER_LEVEL) continue;
+                const float x0 = originX + (i - 1) * s, x1 = x0 + s;
+                const float z0 = originZ + (j - 1) * s, z1 = z0 + s;
+                const float y = static_cast<float>(cell.ground + 1);
+                quad({x0, y, z0}, {x1, y, z0}, {x1, y, z1}, {x0, y, z1}, cell.floor, TOP);
+                // The higher neighbour's side faces this cell.
+                auto step = [&](const Cell &neighbor, const int side) {
+                    const float top = static_cast<float>(std::min(neighbor.ground, WATER_LEVEL) + 1);
+                    if (top <= y) return;
+                    switch (side) {
+                        case WEST: quad({x0, y, z0}, {x0, top, z0}, {x0, top, z1}, {x0, y, z1}, cell.floor, EAST); break;
+                        case EAST: quad({x1, y, z1}, {x1, top, z1}, {x1, top, z0}, {x1, y, z0}, cell.floor, WEST); break;
+                        case NORTH: quad({x1, y, z0}, {x1, top, z0}, {x0, top, z0}, {x0, y, z0}, cell.floor, SOUTH); break;
+                        default: quad({x0, y, z1}, {x0, top, z1}, {x1, top, z1}, {x1, y, z1}, cell.floor, NORTH); break;
+                    }
+                };
+                step(grid[i - 1][j], WEST);
+                step(grid[i + 1][j], EAST);
+                step(grid[i][j - 1], NORTH);
+                step(grid[i][j + 1], SOUTH);
+            }
         }
     }
     out.minY = minY;

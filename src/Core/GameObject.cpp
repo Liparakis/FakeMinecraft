@@ -135,6 +135,7 @@ void GameObject::init() {
             camera.Pitch = pitch;
             camera.processMouseMovement(0.0f, 0.0f);
             cachedMatrices.dirty = true;
+            fixedView = true;
         }
     }
     // FAKEMC_RESIZE="WxH" resizes the window halfway to the screenshot; FAKEMC_MSAA=0 starts with MSAA off.
@@ -148,10 +149,19 @@ void GameObject::init() {
         msaaEnabled = false;
         msaaBox.setChecked(false);
     }
+    if (const char *fxaa = std::getenv("FAKEMC_FXAA"); fxaa && fxaa[0] == '0') {
+        fxaaEnabled = false;
+        fxaaBox.setChecked(false);
+    }
     // FAKEMC_RENDER_DISTANCE overrides the starting real-chunk render distance.
     if (const char *distance = std::getenv("FAKEMC_RENDER_DISTANCE")) Planet::planet->renderDistance = std::atoi(distance);
     // FAKEMC_FPS_CAP overrides the starting FPS setting (55 = VSync, above 360 = uncapped).
     if (const char *cap = std::getenv("FAKEMC_FPS_CAP")) fpsCap = std::atoi(cap);
+    // FAKEMC_TIME freezes the clock at a time of day (0 = noon, 0.25 = sunset), for lighting checks.
+    if (const char *time = std::getenv("FAKEMC_TIME")) {
+        sky.timeOfDay = std::strtof(time, nullptr);
+        sky.dayLengthSeconds = 1e9f; // Not paused: a paused sky never recomputes its lighting.
+    }
     if (!screenshotPath) {
         platform::playMusic("../assets/sounds/songs/Minecraft Volume Alpha.ogg", GameConstants::MUSIC_VOLUME, true);
     }
@@ -239,9 +249,11 @@ void GameObject::initializeUIElements() {
     quitBtn = Button(cachedWindowCenter.x, cachedWindowCenter.y + 90, 200, 40, "Quit Game");
 
     dynamicShadowsBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y - 20, 30);
-    msaaBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 40, 30);
-    fancyLeavesBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 100, 30);
-    distantTerrainBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 160, 30);
+    msaaBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 30, 30);
+    fxaaBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 80, 30);
+    fancyLeavesBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 130, 30);
+    distantTerrainBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 180, 30);
+    fxaaBox.setChecked(true);
     distantTerrainBox.setChecked(true);
     dynamicShadowsBox.setChecked(true);
     msaaBox.setChecked(true);
@@ -275,9 +287,10 @@ void GameObject::onResize() {
     backBtn.setPosition(cachedWindowCenter.x, cachedWindowCenter.y + 220);
 
     dynamicShadowsBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y - 20);
-    msaaBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 40);
-    fancyLeavesBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 100);
-    distantTerrainBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 160);
+    msaaBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 30);
+    fxaaBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 80);
+    fancyLeavesBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 130);
+    distantTerrainBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 180);
 
     cachedMatrices.dirty = true;
     Renderer::get().onResize();
@@ -333,6 +346,7 @@ void GameObject::renderFrame() {
     updateWindowTitle();
     updateFPSSettings();
     renderer.setMsaa(msaaEnabled);
+    renderer.setFxaa(fxaaEnabled);
     SEED = convertToASCIIsum(seedBox.getText());
 
     if (!renderer.beginFrame()) return;
@@ -367,6 +381,7 @@ void GameObject::renderFrame() {
     const float viewEnd = lodTerrain.enabled() ? LodTerrain::VIEW_DISTANCE
                                                : static_cast<float>(Planet::planet->renderDistance * CHUNK_WIDTH);
     mainUniforms.fogColor = glm::vec4(sky.getSkyColor(), 1.0f);
+    mainUniforms.lodWaterColor = lodTerrain.waterUniform();
     // Over 16 km the haze starts early, like real air; the short real-chunk range only hides its edge.
     mainUniforms.fogRange = glm::vec4(viewEnd * (lodTerrain.enabled() ? 0.08f : 0.55f), viewEnd, 0.0f, 1e9f);
 
@@ -418,13 +433,13 @@ void GameObject::renderFrame() {
     renderer.beginMainPass(sky.getSkyColor());
     sky.render(view, camera.Position);
     Planet::planet->render();
-    {
-        // Culled like the chunks: by the player's view, so free camera (F1) shows what the player draws.
-        Frustum frustum;
-        frustum.update(freecamActive ? savedViewProjection : projection * view);
-        lodTerrain.render(frustum);
-        renderer.mark("main: distant");
-    }
+    // Culled like the chunks: by the player's view, so free camera (F1) shows what the player draws.
+    Frustum lodFrustum;
+    lodFrustum.update(freecamActive ? savedViewProjection : projection * view);
+    lodTerrain.render(lodFrustum);
+    renderer.mark("main: distant");
+    Planet::planet->renderWater();
+    lodTerrain.renderWater(lodFrustum);
     renderBlockOutline();
     if (freecamActive) [[unlikely]] renderPlayerModel();
     renderer.endPass();
@@ -682,15 +697,17 @@ void GameObject::renderVideoSettings() const {
     dynamicShadowsBox.draw();
 
     // AA
-    ui::drawText(cachedWindowCenter.x - 130, cachedWindowCenter.y + 35, 18, "Anti-Aliasing", textBrush);
+    ui::drawText(cachedWindowCenter.x - 130, cachedWindowCenter.y + 25, 18, "MSAA 4x", textBrush);
     msaaBox.draw();
+    ui::drawText(cachedWindowCenter.x - 130, cachedWindowCenter.y + 75, 18, "FXAA", textBrush);
+    fxaaBox.draw();
 
     // Leaves
-    ui::drawText(cachedWindowCenter.x - 130, cachedWindowCenter.y + 95, 18, "Fancy Leaves", textBrush);
+    ui::drawText(cachedWindowCenter.x - 130, cachedWindowCenter.y + 125, 18, "Fancy Leaves", textBrush);
     fancyLeavesBox.draw();
 
     // Horizon
-    ui::drawText(cachedWindowCenter.x - 130, cachedWindowCenter.y + 155, 18, "Distant Terrain", textBrush);
+    ui::drawText(cachedWindowCenter.x - 130, cachedWindowCenter.y + 175, 18, "Distant Terrain", textBrush);
     distantTerrainBox.draw();
 
     backBtn.draw();
@@ -755,7 +772,7 @@ void GameObject::mouseCallBack() {
 void GameObject::handlePlayingMouseInput(const platform::MouseState &ms) {
     const auto xOffset = static_cast<float>(ms.relX);
     const auto yOffset = static_cast<float>(-ms.relY);
-    camera.processMouseMovement(xOffset, yOffset, true);
+    if (!fixedView) camera.processMouseMovement(xOffset, yOffset, true);
 
     if (ms.leftPressed || ms.middlePressed || ms.rightPressed) [[unlikely]] {
         const auto result = Physics::raycast(camera.Position, camera.Front,
@@ -802,6 +819,9 @@ void GameObject::handlePausedMouseInput(const platform::MouseState &ms) {
             msaaBox.handleClick(ms.x, ms.y,
                                 [this]() { msaaEnabled = true; },
                                 [this]() { msaaEnabled = false; });
+            fxaaBox.handleClick(ms.x, ms.y,
+                                [this]() { fxaaEnabled = true; },
+                                [this]() { fxaaEnabled = false; });
 
             // Leaves are baked into chunk meshes, so changing the style remeshes the world.
             fancyLeavesBox.handleClick(ms.x, ms.y,
@@ -880,6 +900,7 @@ void GameObject::keyboardCallBack(const float deltaTime) {
         }
         return;
     }
+    if (fixedView) return; // Test view: stray keys must not move it.
 
     // Pre-calculate movement speed
     const float movementSpeed = deltaTime * GameConstants::MOVEMENT_SPEED_MULTIPLIER;

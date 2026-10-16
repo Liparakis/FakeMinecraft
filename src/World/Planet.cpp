@@ -323,7 +323,10 @@ void Planet::render() {
     renderer.bindPipeline(PipelineId::Billboard);
     for (Chunk *const chunk : billboardChunks) chunk->renderAllBillboard();
     renderer.mark("main: plants");
+}
 
+void Planet::renderWater() {
+    Renderer &renderer = Renderer::get();
     renderer.bindPipeline(PipelineId::Fluid);
     for (Chunk *const chunk : waterChunks) chunk->renderAllWater();
     renderer.mark("main: water");

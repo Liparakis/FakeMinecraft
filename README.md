@@ -6,7 +6,7 @@ A 3D voxel-based game inspired by Minecraft, rendered with Vulkan on top of SDL2
 - _Voxel Terrain: Infinite terrain generation using procedural algorithms._
 - _Block Placement & Destruction: Players can interact with the environment by placing and removing blocks._
 - _25 Biomes: oceans, rivers, beaches, plains, forests, taiga, snowy biomes, desert, savanna, badlands, swamp, jungle and mountain peaks, on continuous terrain with no cliffs at biome borders._
-- _Vulkan Renderer: dynamic shadows, water reflections, 4x MSAA and a day/night cycle._
+- _Vulkan Renderer: dynamic shadows, water reflections, 4x MSAA with FXAA, and a day/night cycle._
 - _Distant Terrain: the world is visible out to ~16 km (Minecraft render distance 1028). Blocky low-detail terrain fills in beyond the real chunks and fades into the sky._
 
 ## Tech

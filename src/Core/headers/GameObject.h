@@ -171,6 +171,7 @@ private:
 
     /** @name Debug/Freecam State @{ */
     bool freecamActive = false;
+    bool fixedView = false; ///< FAKEMC_CAMERA: mouse look is ignored, so stray mouse input can't turn a test view.
     glm::vec3 savedPlayerPosition;
     glm::mat4 savedViewProjection;
     /** @} */
@@ -210,10 +211,12 @@ private:
     Checkbox dynamicShadowsBox;
     Checkbox msaaBox;
     Checkbox fancyLeavesBox;
+    Checkbox fxaaBox;
     Checkbox distantTerrainBox;
 
     bool dynamicShadowsEnabled = true;
     bool msaaEnabled = true;
+    bool fxaaEnabled = true;
     bool simpleLightingEnabled = false;
 
     /** @name Shadow map cache (see renderFrame) @{ */

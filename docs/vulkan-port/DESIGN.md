@@ -149,7 +149,7 @@ out to 16,448 blocks, the distance Minecraft reaches at render distance 1028.
 - **Tiles.** A quadtree of 32x32-sample tiles. Level 0 samples every 4 blocks,
   and each level doubles that up to level 8 (every 1,024 blocks). A tile splits
   while the camera is closer than 4x its size, so a cell spans ~4 px on screen at
-  any distance (720p, 70° FOV). With 2.7x larger steps (1.5x) mountains read as
+  any distance (720p, 70Â° FOV). With 2.7x larger steps (1.5x) mountains read as
   giant cubes. Two worker threads build tiles
   nearest-first straight from the terrain function: height, biome, water and a
   raised canopy for forests. No block data exists for them. While a tile builds,
@@ -158,25 +158,43 @@ out to 16,448 blocks, the distance Minecraft reaches at render distance 1028.
   of its block textures (`TextureManager::averageColor`). Canopies are darkened
   to 75% for the shadowed gaps between real leaves. Step walls keep the top
   colour, and only cliffs show rock, so hills don't stripe with dirt. Each cell
-  gets ±7% brightness noise in place of texture detail.
+  gets Â±7% brightness noise in place of texture detail.
 - **Seam with real chunks.** `Planet` writes a 128x128 mask of which chunks are
-  drawn (chunk coordinate mod 128), and `lod.frag` discards fragments over them.
-  LOD tiles are skipped only when they lie fully inside the real-chunk circle,
-  less one chunk of margin, and every chunk under them is drawn. Otherwise
-  chunks still loading at the front edge while moving leave a strip of sky. Tile edges carry
-  skirts so neighbouring levels don't show cracks.
+  drawn (chunk coordinate mod 128), and the LOD shaders discard fragments over
+  them. The mask is `R8_UNORM` holding 1, so the test is "non-zero": it read
+  `> 0.5` at first and never matched, and LOD water drew over real water at the
+  seam. Walls lying exactly on a chunk border count as covered if either side is
+  real. LOD tiles are skipped only when they lie fully inside the real-chunk
+  circle, less one chunk of margin, and every chunk under them is drawn;
+  otherwise chunks still loading at the front edge while moving leave a strip of
+  sky. Land tile edges carry skirts so neighbouring levels don't show cracks, but
+  never below the water surface.
 - **Fog.** Every world shader fades to the sky colour by horizontal distance,
   from 8% of the view distance (~1.3 km) to its end, as haze. The far plane sits at 1.5x the view
   distance. With "Distant Terrain" off (Video Settings), the fog ends at the
   real-chunk radius instead.
-- **Water.** LOD water and real water share one model in `common.glsl`:
-  the water colour mixed with the reflection map by a Schlick fresnel term. Real
-  water is 71% opaque, so LOD water blends in its biome's sea-floor colour at the
-  same ratio and only that part reflects; otherwise the real/LOD edge shows. The
-  reflection pass draws real chunks within 8 chunks, then a coarser LOD cut
-  (split at 1x tile size, ~16x fewer tiles) beyond them. Without it, water under
-  distant shores reflected bare sky and showed as a bright band below the
-  horizon. The coarse cut costs ~0.07 ms; the full-detail one cost 0.72 ms.
+- **Water.** Real water is 71% opaque (`TextureManager` raises the water
+  texture's alpha to 180), and you see through its edge into the LOD beyond, so
+  LOD water reproduces it exactly rather than approximating it:
+  - Level-0 tiles (always within 1,024 blocks) have translucent water
+    (`lod_water.frag`) over a real sea-floor mesh with step walls, shaded like
+    `fluid.frag`: the average water texel lit, mixed with the reflection by a
+    Schlick fresnel term (`waterSurface` in `common.glsl`).
+  - Farther tiles have opaque water whose vertices carry the sea-floor colour;
+    `lod.frag` composites the same surface over it at the same opacity. Near
+    water fades into this composite between 75% and 95% of 1,024 blocks, and
+    far water tiles are walled down to the sea floor at their edges, so nothing
+    is seen under them through the near water. The walls stop at y=64.5, under
+    the reflection's clip plane, or the reflection mirrors them as lines.
+  - Draw order: LOD terrain, real water, near LOD water. Real water writes
+    depth, so drawn before the LOD it hid it, and its edge showed sky.
+  - The reflection pass draws real chunks within 8 chunks, then a coarser LOD
+    cut (split at 1x tile size, ~16x fewer tiles) beyond them. Without it, water
+    under distant shores reflected bare sky. The coarse cut costs ~0.07 ms; the
+    full-detail one cost 0.72 ms.
+  - LOD terrain receives real chunks' shadows (`terrainShadow`), and water
+    shadows fade toward the shadow map's edge like terrain's. Letting LOD tiles
+    cast shadows too changed nothing at the seam, so they don't.
 - **Not drawn far away:** trees as individual blocks, caves, structures and
   player edits.
 
@@ -187,3 +205,12 @@ CPU frame is 1.66 ms (~600 FPS). The previous commit, with 30 real chunks and
 fewer real chunks. A/B runs alternating both builds put the LOD build at
 1.3-2x the previous commit across spawn and this view (the machine was noisy). `FAKEMC_RENDER_DISTANCE=N` sets the
 real-chunk radius for tests.
+
+## FXAA (2026-10-16)
+
+4x MSAA smooths polygon edges only to 4 samples, and distant terrain is
+mostly edges a pixel or two apart, so its silhouettes and block steps still
+stair-step. With FXAA on (Video Settings, default; `FAKEMC_FXAA=0` turns it
+off), the main pass resolves into an offscreen `sceneColor` image instead of the
+swapchain, and the UI pass starts with one fullscreen FXAA 3.11 (quality)
+draw from it, so the UI stays sharp. It costs 0.06-0.07 ms at 1280x720.

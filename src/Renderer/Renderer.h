@@ -44,6 +44,7 @@ struct alignas(16) FrameUniforms {
     glm::vec4 clipPlane{0.0f, 0.0f, 0.0f, 1.0f}; ///< Fragments with dot(pos, plane) < 0 are discarded.
     glm::vec4 fogColor{0.0f};  ///< rgb; matches the sky so the horizon blends into it.
     glm::vec4 fogRange{1e9f, 2e9f, 0.0f, 1e9f}; ///< x = fog start, y = fog end (blocks, horizontal); w = real-chunk reach (lod.frag).
+    glm::vec4 lodWaterColor{0.0f}; ///< rgb = average water texel, a = water opacity; distant water uses real water's model.
     float ambientStrength = 0.0f;
     float time = 0.0f;
     int32_t simpleLighting = 0;
@@ -51,7 +52,7 @@ struct alignas(16) FrameUniforms {
 };
 
 enum class PipelineId : uint8_t {
-    World, WorldOpaque, Billboard, Fluid, Sky, Outline, Model, ShadowWorld, ShadowBillboard, UI, Lod
+    World, WorldOpaque, Billboard, Fluid, Sky, Outline, Model, ShadowWorld, ShadowBillboard, UI, Lod, LodWater, Fxaa
 };
 
 using TextureId = uint32_t;
@@ -98,6 +99,8 @@ public:
 
     void setVsync(bool vsync);
     void setMsaa(bool enabled) { msaa = enabled; }
+    /// FXAA on the resolved scene, before the UI; smooths what MSAA leaves (thin and distant edges).
+    void setFxaa(bool enabled) { fxaa = enabled; }
     [[nodiscard]] bool msaaEnabled() const { return msaa; }
     [[nodiscard]] VkExtent2D extent() const { return ctx().swapchainExtent; }
 
@@ -146,6 +149,8 @@ private:
     void createTargets();
     void destroyTargets();
     void createDescriptors();
+    /// Points sceneSet at the current sceneColor (recreated with the swapchain).
+    void writeSceneSet();
     void writeFrameSets();
     VkPipeline pipelineFor(PipelineId id);
     VkPipeline buildPipeline(const PipelineKey &key);
@@ -155,6 +160,7 @@ private:
 
     SDL_Window *window = nullptr;
     bool msaa = true;
+    bool fxaa = true;
     bool vsync = true;
     bool swapchainStale = false;
     bool recording = false; ///< Between beginFrame and endFrame.
@@ -163,6 +169,8 @@ private:
 
     GpuImage textureArray, shadowMap, reflectionColor, reflectionDepth;
     GpuImage msaaColor, msaaDepth, depth;
+    GpuImage sceneColor;                        ///< The main pass's output when FXAA is on; read by the FXAA pass.
+    VkDescriptorSet sceneSet = VK_NULL_HANDLE; ///< sceneColor as a set-1 texture.
     GpuImage chunkMask;
     VkSampler blockSampler = VK_NULL_HANDLE, nearestClamp = VK_NULL_HANDLE, linearClamp = VK_NULL_HANDLE;
     VkSampler shadowSampler = VK_NULL_HANDLE; ///< Linear depth-compare sampler (hardware PCF).

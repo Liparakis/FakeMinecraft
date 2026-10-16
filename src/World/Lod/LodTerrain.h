@@ -34,7 +34,8 @@ public:
     static constexpr int BASE_SPACING = 4;    ///< Blocks per sample at level 0.
     static constexpr int MAX_LEVEL = 8;       ///< Level 8 samples every 1024 blocks.
     static constexpr float VIEW_DISTANCE = 16448.0f; ///< Minecraft render distance 1028 (x16 blocks).
-    static constexpr uint8_t WATER_TOP = 7; ///< LodVertex::direction of water surfaces (LOD_WATER_TOP in common.glsl).
+    static constexpr uint8_t WATER_TOP = 7;  ///< LodVertex::direction of opaque far water; rgb = sea floor (common.glsl).
+    static constexpr uint8_t WATER_NEAR = 8; ///< Translucent water of level-0 tiles, over their sea floor mesh.
 
     LodTerrain() = default;
     ~LodTerrain();
@@ -56,6 +57,10 @@ public:
                 const uint8_t *chunkMask, long seed);
     /// Draws the selected tiles that pass the frustum, inside the main pass or (coarser) the reflection pass.
     void render(const Frustum &frustum, bool reflection = false) const;
+    /// Translucent water of the nearest tiles; with the real water, after everything seen through it.
+    void renderWater(const Frustum &frustum) const;
+    /// FrameUniforms::lodWaterColor: average water texel and opacity.
+    [[nodiscard]] glm::vec4 waterUniform() const;
 
 private:
     struct TileKey {

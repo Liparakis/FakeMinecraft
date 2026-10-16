@@ -65,8 +65,10 @@ public:
     /// The old meshes keep drawing until the new ones are uploaded.
     void remeshAll();
 
-    /// Draws solid blocks, billboards and water from prepare()'s lists; must run inside the main pass.
+    /// Draws solid blocks and billboards from prepare()'s lists; must run inside the main pass.
     void render();
+    /// Translucent water, after everything it can be seen through (distant terrain included).
+    void renderWater();
 
     /// Draws shadow casters near the player; must run inside the shadow pass.
     void renderShadows(const glm::mat4& lightSpace);
