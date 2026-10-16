@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <iostream>
 #include <vector>
-#include <GL/glew.h>
 #include "WorldGen.h"
 #include "glm/gtc/matrix_transform.hpp"
 
@@ -31,9 +30,7 @@ static constexpr int NEIGHBOR_OFFSETS[6][3] = {
 static constexpr size_t EXPECTED_CHUNK_COUNT = 4000;
 static constexpr size_t EXPECTED_VISIBLE_CHUNKS = 800;
 
-Planet::Planet(Shader *solidShader, Shader *waterShader, Shader *billboardShader, Shader* bboxShader)
-    : solidShader(solidShader), waterShader(waterShader), billboardShader(billboardShader), bboxShader(bboxShader) {
-
+Planet::Planet() {
     // Reserve some space upfront so it doesn't slow down the game later.
     chunks.reserve(EXPECTED_CHUNK_COUNT);
     chunkList.reserve(EXPECTED_CHUNK_COUNT);
@@ -48,67 +45,24 @@ Planet::Planet(Shader *solidShader, Shader *waterShader, Shader *billboardShader
     toDeleteList.reserve(100);
 
     chunkThread = std::thread(&Planet::chunkThreadUpdate, this);
-
-    // Initialize Shadow Map
-    glGenFramebuffers(1, &depthMapFBO);
-    glGenTextures(1, &depthMap);
-    glBindTexture(GL_TEXTURE_2D, depthMap);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, SHADOW_WIDTH, SHADOW_HEIGHT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthMap, 0);
-    glDrawBuffer(GL_NONE);
-    glReadBuffer(GL_NONE);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-    // Initialize Reflection FBO
-    glGenFramebuffers(1, &reflectionFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, reflectionFBO);
-    glGenTextures(1, &reflectionTexture);
-    glBindTexture(GL_TEXTURE_2D, reflectionTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, REFLECTION_WIDTH, REFLECTION_HEIGHT, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, reflectionTexture, 0);
-    
-    // Depth renderbuffer for correct depth testing
-    glGenRenderbuffers(1, &reflectionDepthRBO);
-    glBindRenderbuffer(GL_RENDERBUFFER, reflectionDepthRBO);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, REFLECTION_WIDTH, REFLECTION_HEIGHT);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, reflectionDepthRBO);
-    
-    // Check if FBO is complete
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-        std::cerr << "ERROR::FRAMEBUFFER:: Reflection Framebuffer is not complete!" << std::endl;
-        
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 Planet::~Planet() {
-    glDeleteFramebuffers(1, &depthMapFBO);
-    glDeleteTextures(1, &depthMap);
-    
-    glDeleteFramebuffers(1, &reflectionFBO);
-    glDeleteTextures(1, &reflectionTexture);
-    glDeleteRenderbuffers(1, &reflectionDepthRBO);
-
     shouldEnd.store(true, std::memory_order_release);
     if (chunkThread.joinable()) {
         chunkThread.join();
     }
+
+    // Each chunk hands its GPU meshes back to the renderer as it is destroyed.
+    for (auto &[pos, chunk] : chunks) delete chunk;
+    for (Chunk *chunk : chunkPool) delete chunk;
 }
 
 //==============================================================================
 // MAIN UPDATE - Called every frame
 //==============================================================================
 
-void Planet::update(const glm::vec3 &cameraPos, bool updateOcclusion) {
+void Planet::prepare(const glm::vec3 &cameraPos) {
     // Relaxed atomics are used here because they are faster and suitable for simple seed checks.
     const long currentSeed = SEED;
     const long cachedSeed = last_seed.load(std::memory_order_relaxed);
@@ -169,8 +123,6 @@ void Planet::update(const glm::vec3 &cameraPos, bool updateOcclusion) {
     frustumVisibleChunks.clear();
     toDeleteList.clear();
 
-    glDisable(GL_BLEND);
-
     // Use atomic load for lock-free check.
     if (UNLIKELY(renderChunksDirty.load(std::memory_order_acquire))) {
         std::unique_lock lock(chunkMutex);
@@ -217,7 +169,7 @@ void Planet::update(const glm::vec3 &cameraPos, bool updateOcclusion) {
             chunksLoading.fetch_add(1, std::memory_order_relaxed);
         }
 
-        if (LIKELY(chunk->ready && frustum.isBoxVisible(chunk->cullingCenter, chunk->cullingExtents))) {
+        if (LIKELY(chunk->hasMesh() && frustum.isBoxVisible(chunk->cullingCenter, chunk->cullingExtents))) {
             const float dx = chunk->cullingCenter.x - camPosX;
             const float dy = chunk->cullingCenter.y - camPosY;
             const float dz = chunk->cullingCenter.z - camPosZ;
@@ -229,13 +181,7 @@ void Planet::update(const glm::vec3 &cameraPos, bool updateOcclusion) {
             chunk->cachedDistSq = distSq;
             frustumVisibleChunks.push_back(chunk);
 
-            // Chunks in this 3x3x3 zone around the camera are always drawn to prevent blocks from flickering.
-            const int distCX = std::abs(pos.x - newCamChunkX);
-            const int distCY = std::abs(pos.y - newCamChunkY);
-            const int distCZ = std::abs(pos.z - newCamChunkZ);
-            const bool inSafeZone = (distCX <= 1) & (distCY <= 1) & (distCZ <= 1);
-
-            if (LIKELY(chunk->occlusionVisible || inSafeZone)) {
+            {
                 numChunksRendered.fetch_add(1, std::memory_order_relaxed);
 
                 if (chunk->hasSolid()) solidChunks.push_back(chunk);
@@ -292,270 +238,95 @@ void Planet::update(const glm::vec3 &cameraPos, bool updateOcclusion) {
 
                 chunkPool.push_back(chunk);
                 chunks.erase(it);
-                renderChunksDirty.store(true, std::memory_order_release);
-            }
-        }
-    }
-
-    // Hardware Occlusion Query result processing.
-    static int frameCounter = 0;
-    if (updateOcclusion) {
-        ++frameCounter;
-
-        const size_t visibleCount = frustumVisibleChunks.size();
-        for (size_t i = 0; i < visibleCount; ++i) {
-            Chunk * const chunk = frustumVisibleChunks[i];
-
-            const size_t chunkHash = chunk->chunkPos.x * 73856093 ^
-                                    chunk->chunkPos.y * 19349663 ^
-                                    chunk->chunkPos.z * 83492791;
-            const bool shouldQuery = (chunkHash + frameCounter) % 3 == 0;
-
-            if (chunk->queryID != 0 && chunk->queryIssued && shouldQuery) {
-                GLint available = GL_FALSE;
-                glGetQueryObjectiv(chunk->queryID, GL_QUERY_RESULT_AVAILABLE, &available);
-
-                if (LIKELY(available == GL_TRUE)) {
-                    GLuint result = 0;
-                    glGetQueryObjectuiv(chunk->queryID, GL_QUERY_RESULT, &result);
-                    const bool rawVisible = (result > 0);
-
-                    // A voting system (hysteresis) is used to prevent flickering in/out.
-                    if (LIKELY(rawVisible)) {
-                        chunk->occlusionVisible = true;
-                        chunk->occlusionCounter = 0;
-                    } else {
-                        if (++chunk->occlusionCounter >= 4) {
-                            chunk->occlusionVisible = false;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Solid rendering pass.
-    solidShader->use();
-    const size_t solidCount = solidChunks.size();
-    for (size_t i = 0; i < solidCount; ++i) {
-        solidChunks[i]->renderAllSolid();
-    }
-
-    // Hardware Occlusion Query issuance pass.
-    if (updateOcclusion) {
-        bboxShader->use();
-        (*bboxShader)["viewProjection"] = lastViewProjection;
-
-        glEnable(GL_DEPTH_TEST);
-        glDepthFunc(GL_GEQUAL);
-        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-        glDepthMask(GL_FALSE);
-        glDisable(GL_CULL_FACE);
-
-        if (UNLIKELY(bboxVAO == 0)) initBoundingBoxMesh();
-        glBindVertexArray(bboxVAO);
-
-        const int safeZoneMinX = newCamChunkX - 1;
-        const int safeZoneMaxX = newCamChunkX + 1;
-        const int safeZoneMinY = newCamChunkY - 1;
-        const int safeZoneMaxY = newCamChunkY + 1;
-        const int safeZoneMinZ = newCamChunkZ - 1;
-        const int safeZoneMaxZ = newCamChunkZ + 1;
-
-        const size_t visibleCount = frustumVisibleChunks.size();
-        for (size_t i = 0; i < visibleCount; ++i) {
-            Chunk * const chunk = frustumVisibleChunks[i];
-
-            if (chunk->queryID != 0) {
-                const int posX = chunk->chunkPos.x;
-                const int posY = chunk->chunkPos.y;
-                const int posZ = chunk->chunkPos.z;
-
-                const bool inSafeZone = (posX >= safeZoneMinX && posX <= safeZoneMaxX) &&
-                                       (posY >= safeZoneMinY && posY <= safeZoneMaxY) &&
-                                       (posZ >= safeZoneMinZ && posZ <= safeZoneMaxZ);
-
-                if (inSafeZone) continue;
-
-                const size_t chunkHash = posX * 73856093 ^ posY * 19349663 ^ posZ * 83492791;
-
-                if ((chunkHash + frameCounter) % 3 == 0) {
-                    glBeginQuery(GL_SAMPLES_PASSED, chunk->queryID);
-
-                    glm::mat4 model = glm::mat4(1.0f);
-                    model = glm::translate(model, chunk->cullingCenter);
-                    model = glm::scale(model, (chunk->cullingExtents - 0.01f) * 2.0f);
-                    (*bboxShader)["model"] = model;
-                    glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
-
-                    glEndQuery(GL_SAMPLES_PASSED);
-                    chunk->queryIssued = true;
-                }
             }
         }
 
-        glBindVertexArray(0);
-        glEnable(GL_CULL_FACE);
-        glDepthMask(GL_TRUE);
-        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glDepthFunc(GL_GEQUAL);
+        // Pooled chunks may be reset by the chunk thread at any moment, so the shadow and
+        // reflection passes later this frame must not see them in the snapshot.
+        renderChunks = chunkList;
+        renderChunksDirty.store(false, std::memory_order_release);
     }
 
-    // Billboard rendering pass.
-    billboardShader->use();
-    glDisable(GL_CULL_FACE);
-    const size_t billboardCount = billboardChunks.size();
-    for (size_t i = 0; i < billboardCount; ++i) {
-        billboardChunks[i]->renderAllBillboard();
-    }
-    glEnable(GL_CULL_FACE);
-
-    // Water rendering pass.
-    glEnable(GL_BLEND);
-    glDisable(GL_CULL_FACE);
-    waterShader->use();
-    const size_t waterCount = waterChunks.size();
-    for (size_t i = 0; i < waterCount; ++i) {
-        waterChunks[i]->renderAllWater();
-    }
-    glEnable(GL_CULL_FACE);
 }
 
-void Planet::renderShadows(Shader* shader) {
-    shader->use();
+void Planet::render() {
+    Renderer &renderer = Renderer::get();
+
+    renderer.bindPipeline(PipelineId::World);
+    for (Chunk *const chunk : solidChunks) chunk->renderAllSolid();
+
+    renderer.bindPipeline(PipelineId::Billboard);
+    for (Chunk *const chunk : billboardChunks) chunk->renderAllBillboard();
+
+    renderer.bindPipeline(PipelineId::Fluid);
+    for (Chunk *const chunk : waterChunks) chunk->renderAllWater();
+}
+
+void Planet::renderShadows(const glm::mat4 &lightSpace) {
+    Renderer &renderer = Renderer::get();
     
     // Shadow culling is implemented here to only render shadows for chunks near the player.
     const int camX = camChunkX.load(std::memory_order_relaxed);
-    const int camY = camChunkY.load(std::memory_order_relaxed);
     const int camZ = camChunkZ.load(std::memory_order_relaxed);
     const int shadowRadius = static_cast<int>(shadowDistance / CHUNK_WIDTH) + 1;
     
-    // We iterate over the main chunk list as renderChunks might be overly culled for shadows
-    // Optimization: In a real scenario, we'd maintain a separate "shadow visible" list
-    // For now, we iterate all chunks but only draw close ones.
-    const size_t chunkSize = chunkList.size();
-    for(size_t i = 0; i < chunkSize; ++i) {
-        Chunk* const chunk = chunkList[i];
-        if(!chunk || !chunk->ready) continue;
+    // renderChunks is the render thread's snapshot; chunkList belongs to the chunk thread.
+    shadowCasters.clear();
+    for (Chunk *const chunk : renderChunks) {
+        if (!chunk->hasMesh()) continue;
         
         const ChunkPos& pos = chunk->chunkPos;
         if (abs(pos.x - camX) > shadowRadius || abs(pos.z - camZ) > shadowRadius) continue;
         
-        // Draw solid
-        if(chunk->hasSolid()) {
-             chunk->renderAllSolid();
-        }
-        
-        // Draw billboards (trees, etc cast shadows too)
-        if(chunk->hasBillboard()) {
-             chunk->renderAllBillboard();
-        }
+        shadowCasters.push_back(chunk);
     }
+
+    renderer.bindPipeline(PipelineId::ShadowWorld);
+    renderer.pushConstants(&lightSpace, sizeof(lightSpace));
+    for (Chunk *const chunk : shadowCasters) chunk->renderAllSolid();
+
+    // Plants and leaves cast shadows too.
+    renderer.bindPipeline(PipelineId::ShadowBillboard);
+    renderer.pushConstants(&lightSpace, sizeof(lightSpace));
+    for (Chunk *const chunk : shadowCasters) chunk->renderAllBillboard();
 }
 
 
-void Planet::renderReflection(const glm::vec3 &cameraPos, const glm::vec3 &cameraFront, float aspectRatio) {
-    // waterChunks is last frame's visible water; with none on screen the reflection is never sampled.
-    if (waterChunks.empty()) return;
+Planet::ReflectionCamera Planet::reflectionCamera(const glm::vec3 &cameraPos, const glm::vec3 &cameraFront, const float aspectRatio) {
+    const float waterLevel = static_cast<float>(WATER_LEVEL);
 
-    // Distant reflections are tiny and distorted by the water shader, so only nearby chunks are drawn.
-    constexpr float REFLECTION_RANGE = 8.0f * CHUNK_WIDTH;
-    auto inReflectionRange = [&](const Chunk *chunk) {
-        const float dx = chunk->cullingCenter.x - cameraPos.x;
-        const float dz = chunk->cullingCenter.z - cameraPos.z;
-        return dx * dx + dz * dz <= REFLECTION_RANGE * REFLECTION_RANGE;
-    };
-
-    glViewport(0, 0, REFLECTION_WIDTH, REFLECTION_HEIGHT);
-    glBindFramebuffer(GL_FRAMEBUFFER, reflectionFBO);
-    
-    // Clear with Sky Color
-    glClearColor(0.5f, 0.7f, 1.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    
-    const float waterLevel = 64.0f; // HARDCODED for now, matching WorldConstants
-    
-    // Calculate Reflection Camera
+    // Mirror the camera below the water plane and flip its pitch.
     glm::vec3 reflectPos = cameraPos;
     reflectPos.y = waterLevel - (cameraPos.y - waterLevel);
-    
-    // Reflect front vector: invert Y component
     glm::vec3 reflectFront = cameraFront;
     reflectFront.y = -reflectFront.y;
-    
-    glm::mat4 view = glm::lookAt(reflectPos, reflectPos + reflectFront, glm::vec3(0, 1, 0));
-    // The same Reverse-Z setup as the main camera is used so everything lines up.
-    glm::mat4 projection = glm::perspective(glm::radians(90.0f), aspectRatio, 10000.0f, 0.1f);
-    
-    // Store for water shader to use during main pass
-    reflectionViewProjection = projection * view;
-    
-    // Create Reflection Frustum for Culling
+
+    return {
+        glm::lookAt(reflectPos, reflectPos + reflectFront, glm::vec3(0, 1, 0)),
+        // Same reverse-Z setup as the main camera.
+        glm::perspective(glm::radians(90.0f), aspectRatio, 10000.0f, 0.1f),
+    };
+}
+
+void Planet::renderReflection(const glm::vec3 &cameraPos, const glm::mat4 &reflectionViewProjection) {
+    // Distant reflections are tiny and distorted by the water shader, so only nearby chunks are drawn.
+    constexpr float REFLECTION_RANGE = 8.0f * CHUNK_WIDTH;
     Frustum reflectionFrustum;
-    reflectionFrustum.update(projection * view);
-
-    // A clip plane is set so only reflections above the water level are rendered.
-    glm::vec4 clipPlane = glm::vec4(0.0f, 1.0f, 0.0f, -(waterLevel + 0.5f));
-    
-    // Update Shaders
-    
-    // 1. Render Solid Chunks
-    solidShader->use();
-    (*solidShader)["view"] = view;
-    (*solidShader)["projection"] = projection;
-    (*solidShader)["clipPlane"] = clipPlane;
-    (*solidShader)["lightSpaceMatrix"] = lightSpaceMatrix;
-    
-    // Set up Reverse-Z Depth Testing for Reflection Pass
-    glEnable(GL_DEPTH_TEST);
-    glDepthMask(GL_TRUE);
-    glDepthFunc(GL_GEQUAL);
-    glClearDepth(0.0f);
-    glClear(GL_DEPTH_BUFFER_BIT); // Clear purely the depth buffer (color already cleared)
-    
-    glCullFace(GL_BACK); 
-    
-    // Iterate over ALL active chunks (renderChunks), not just the ones visible to the main camera
-    const size_t chunkSize = renderChunks.size();
-    for (size_t i = 0; i < chunkSize; ++i) {
-        Chunk *const chunk = renderChunks[i];
-        
-        // Skip if not ready or no solid mesh
-        if (!chunk->ready || !chunk->hasSolid()) continue;
-
-        // Skip chunks that are entirely below water level (prevent underwater geometry in reflection)
-        const float chunkMaxY = chunk->chunkPos.y * CHUNK_HEIGHT + CHUNK_HEIGHT;
-        if (chunkMaxY < waterLevel - 2.0f) continue;  // 2 block margin
-
-        // Perform Frustum Culling against Reflection Frustum
-        if (inReflectionRange(chunk) && reflectionFrustum.isBoxVisible(chunk->cullingCenter, chunk->cullingExtents)) {
-            chunk->renderAllSolid();
-        }
+    reflectionFrustum.update(reflectionViewProjection);
+    reflectedChunks.clear();
+    for (Chunk *const chunk : renderChunks) {
+        if (!chunk->hasMesh()) continue;
+        const float dx = chunk->cullingCenter.x - cameraPos.x;
+        const float dz = chunk->cullingCenter.z - cameraPos.z;
+        if (dx * dx + dz * dz > REFLECTION_RANGE * REFLECTION_RANGE) continue;
+        if (reflectionFrustum.isBoxVisible(chunk->cullingCenter, chunk->cullingExtents)) reflectedChunks.push_back(chunk);
     }
-    
-    // 2. Render Billboards
-    billboardShader->use();
-    (*billboardShader)["view"] = view;
-    (*billboardShader)["projection"] = projection;
-    (*billboardShader)["clipPlane"] = clipPlane;
-    
-    for (size_t i = 0; i < chunkSize; ++i) {
-        Chunk *const chunk = renderChunks[i];
-        
-        if (!chunk->ready || !chunk->hasBillboard()) continue;
 
-        // Skip chunks that are entirely below water level
-        const float chunkMaxY = chunk->chunkPos.y * CHUNK_HEIGHT + CHUNK_HEIGHT;
-        if (chunkMaxY < waterLevel - 2.0f) continue;
-
-        if (inReflectionRange(chunk) && reflectionFrustum.isBoxVisible(chunk->cullingCenter, chunk->cullingExtents)) {
-            chunk->renderAllBillboard();
-        }
-    }
-    
-    // Restore State
-    glCullFace(GL_BACK);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    Renderer &renderer = Renderer::get();
+    renderer.bindPipeline(PipelineId::World);
+    for (Chunk *const chunk : reflectedChunks) chunk->renderAllSolid();
+    renderer.bindPipeline(PipelineId::Billboard);
+    for (Chunk *const chunk : reflectedChunks) chunk->renderAllBillboard();
 }
 
 //==============================================================================
@@ -585,8 +356,7 @@ std::pair<glm::vec3, glm::vec3> Planet::getChunkBounds(const ChunkPos &pos) noex
     };
 }
 
-void Planet::updateFrustum(const glm::mat4 &frustumVP, const glm::mat4 &renderingVP) {
-    lastViewProjection = renderingVP;
+void Planet::updateFrustum(const glm::mat4 &frustumVP) {
     frustum.update(frustumVP);
 }
 
@@ -964,53 +734,4 @@ Chunk *Planet::getChunk(const ChunkPos chunkPos) {
 
 void Planet::clearChunkQueue() {
     lastCamX.fetch_add(1, std::memory_order_relaxed);
-}
-
-//==============================================================================
-// Hardware Occlusion Helper Methods
-//==============================================================================
-
-void Planet::initBoundingBoxMesh() {
-    // Use constexpr for compile-time data to avoid runtime initialization overhead.
-    constexpr float vertices[] = {
-        -0.5f, -0.5f, -0.5f,  0.5f, -0.5f, -0.5f,  0.5f,  0.5f, -0.5f, -0.5f,  0.5f, -0.5f,
-        -0.5f, -0.5f,  0.5f,  0.5f, -0.5f,  0.5f,  0.5f,  0.5f,  0.5f, -0.5f,  0.5f,  0.5f,
-    };
-
-    constexpr unsigned int indices[] = {
-        0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4,
-        0, 1, 5, 5, 4, 0, 2, 3, 7, 7, 6, 2,
-        0, 3, 7, 7, 4, 0, 1, 2, 6, 6, 5, 1
-    };
-
-    glGenVertexArrays(1, &bboxVAO);
-    glGenBuffers(1, &bboxVBO);
-    glGenBuffers(1, &bboxEBO);
-
-    glBindVertexArray(bboxVAO);
-
-    glBindBuffer(GL_ARRAY_BUFFER, bboxVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, bboxEBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
-
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
-    glEnableVertexAttribArray(0);
-
-    glBindVertexArray(0);
-}
-
-void Planet::drawBoundingBox(const glm::vec3& center, const glm::vec3& extents) {
-    if (UNLIKELY(bboxVAO == 0)) initBoundingBoxMesh();
-
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, center);
-    model = glm::scale(model, extents * 2.0f);
-
-    (*bboxShader)["model"] = model;
-
-    glBindVertexArray(bboxVAO);
-    glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, nullptr);
-    glBindVertexArray(0);
 }

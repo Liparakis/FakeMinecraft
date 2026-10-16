@@ -1,102 +1,94 @@
-cmake_minimum_required(VERSION 3.16)
-project(CPP_GAME)
+cmake_minimum_required(VERSION 3.20)
+project(CPP_GAME CXX RC)
 
-# Import the PowerShell script
+if (NOT MINGW)
+    message(FATAL_ERROR "Fake Minecraft builds with MinGW GCC only (for example CLion's bundled MinGW toolchain).")
+endif ()
+
 include(${CMAKE_SOURCE_DIR}/CMakeScripts/PowerShell.cmake)
 
 set(CMAKE_CXX_STANDARD 20)
-set(DEP_LIB ${CMAKE_SOURCE_DIR}/dependencies/lib)
-set(ASSETS_DIR "${CMAKE_SOURCE_DIR}/assets")
-set(APP_ICON "${CMAKE_SOURCE_DIR}/assets/sprites/logo.ico"
-        src/World/Chunk/ChunkMeshGeneration.cpp
-        src/World/Chunk/headers/ChunkGreedyMeshing.h
-        src/World/Chunk/headers/ChunkUtils.h
-        src/World/Chunk/ChunkRendering.cpp
-        src/World/Chunk/ChunkFaceGeneration.cpp)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if (NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif ()
 
-file(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS
-        src/*.h
-        src/*.cpp
-)
+# Vulkan headers, vulkan-1 import library and glslc all come from the Vulkan SDK (VULKAN_SDK).
+find_package(Vulkan REQUIRED COMPONENTS glslc)
 
-file(GLOB SHADER_FILES "${ASSETS_DIR}/shaders/*")
-file(GLOB SPRITE_FILES "${ASSETS_DIR}/sprites/*")
+set(DEP_BIN ${CMAKE_SOURCE_DIR}/dependencies/bin)
+set(ASSETS_DIR ${CMAKE_SOURCE_DIR}/assets)
+set(BUILD_ASSETS_DIR ${CMAKE_SOURCE_DIR}/build/assets)
 
-include_directories(
+file(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS src/*.h src/*.cpp)
+
+add_executable(CPP_GAME ${SOURCE_FILES} src/app.rc)
+
+target_include_directories(CPP_GAME PRIVATE
         ${CMAKE_SOURCE_DIR}/dependencies/include
-        ${CMAKE_SOURCE_DIR}/dependencies/lib
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/src/Core/headers
         ${CMAKE_SOURCE_DIR}/src/World/headers
         ${CMAKE_SOURCE_DIR}/src/World/Chunk/headers
+        ${CMAKE_SOURCE_DIR}/src/Renderer
         ${CMAKE_SOURCE_DIR}/src/Renderer/headers
         ${CMAKE_SOURCE_DIR}/src/Renderer/Vertices
         ${CMAKE_SOURCE_DIR}/src/UI/headers
 )
 
-link_directories(
-        ${CMAKE_SOURCE_DIR}/dependencies/lib
+target_compile_definitions(CPP_GAME PRIVATE
+        SDL_MAIN_HANDLED
 )
 
-set(LIBS
-        ${DEP_LIB}/SDL2_mixer.lib
-        ${DEP_LIB}/SDL2main.lib
-        ${DEP_LIB}/SDL2test.lib
-        ${DEP_LIB}/glew32.lib
-        ${DEP_LIB}/glew32s.lib
-        ${DEP_LIB}/SDL2.lib
-        ${DEP_LIB}/freetype.lib
-        ${DEP_LIB}/OpenGL32.lib
+# SDL2 and SDL2_mixer are C libraries, so MinGW links their DLLs directly.
+target_link_libraries(CPP_GAME PRIVATE
+        Vulkan::Vulkan
+        ${DEP_BIN}/SDL2.dll
+        ${DEP_BIN}/SDL2_mixer.dll
+        -static-libgcc -static-libstdc++
 )
 
-add_executable(CPP_GAME ${SOURCE_FILES} ${APP_ICON})
+# std::thread needs winpthread at runtime; ship the compiler's copy next to the exe.
+get_filename_component(MINGW_BIN ${CMAKE_CXX_COMPILER} DIRECTORY)
+set(WINPTHREAD_DLL ${MINGW_BIN}/libwinpthread-1.dll)
 
-add_custom_target(Assets ALL
-        DEPENDS ${SHADER_FILES} ${SPRITE_FILES}
-)
-
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    list(APPEND LIBS ${DEP_LIB}/sggd.lib)
-    target_link_libraries(${PROJECT_NAME} PUBLIC sggd)
-else ()
-    list(APPEND LIBS ${DEP_LIB}/sgg.lib)
-    target_link_libraries(${PROJECT_NAME} PUBLIC sgg)
-endif ()
-
-# Set the output directory for the executable directly to 'game'
 set_target_properties(CPP_GAME PROPERTIES
+        WIN32_EXECUTABLE TRUE
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/game")
 
-set_target_properties(CPP_GAME PROPERTIES
-        LINK_FLAGS "/ENTRY:mainCRTStartup /SUBSYSTEM:WINDOWS")
+# Shaders are compiled to SPIR-V next to the other runtime assets.
+file(GLOB SHADER_SOURCES CONFIGURE_DEPENDS ${ASSETS_DIR}/shaders/*.vert ${ASSETS_DIR}/shaders/*.frag)
+set(SPIRV_FILES)
+foreach (SHADER ${SHADER_SOURCES})
+    get_filename_component(SHADER_NAME ${SHADER} NAME)
+    set(SPIRV ${BUILD_ASSETS_DIR}/shaders/${SHADER_NAME}.spv)
+    add_custom_command(
+            OUTPUT ${SPIRV}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${BUILD_ASSETS_DIR}/shaders
+            COMMAND Vulkan::glslc ${SHADER} -o ${SPIRV}
+            DEPENDS ${SHADER} ${ASSETS_DIR}/shaders/common.glsl
+            COMMENT "Compiling ${SHADER_NAME}")
+    list(APPEND SPIRV_FILES ${SPIRV})
+endforeach ()
+add_custom_target(Shaders ALL DEPENDS ${SPIRV_FILES})
+add_dependencies(CPP_GAME Shaders)
 
 add_custom_command(TARGET CPP_GAME POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_SOURCE_DIR}/dependencies/bin $<TARGET_FILE_DIR:CPP_GAME>
-
-        # Copy assets folder directly to the build directory
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_SOURCE_DIR}/assets ${CMAKE_SOURCE_DIR}/build/assets
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${DEP_BIN} $<TARGET_FILE_DIR:CPP_GAME>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${WINPTHREAD_DLL} $<TARGET_FILE_DIR:CPP_GAME>
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${ASSETS_DIR}/fonts ${BUILD_ASSETS_DIR}/fonts
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${ASSETS_DIR}/sounds ${BUILD_ASSETS_DIR}/sounds
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${ASSETS_DIR}/sprites ${BUILD_ASSETS_DIR}/sprites
 )
 
-# Use the execute_powershell command to create the shortcut with output and result variables
+# Desktop-style shortcut with the game icon in the build folder.
 execute_powershell(
         "$ErrorActionPreference = 'Stop';
         $s=(New-Object -COMObject WScript.Shell).CreateShortcut('${CMAKE_SOURCE_DIR}/build/CPP_GAME.lnk');
         $s.TargetPath='${CMAKE_SOURCE_DIR}/build/game/CPP_GAME.exe';
+        $s.WorkingDirectory='${CMAKE_SOURCE_DIR}/build/game';
+        $s.IconLocation='${CMAKE_SOURCE_DIR}/assets/sprites/logo.ico';
         $s.Save()"
         OUTPUT_VARIABLE PS_OUTPUT
         RESULT_VARIABLE PS_RESULT
-)
-
-# Use another execute_powershell command to set the icon for the shortcut
-execute_powershell(
-        "$ErrorActionPreference = 'Stop';
-        $shortcutPath='${CMAKE_SOURCE_DIR}/build/CPP_GAME.lnk';
-        $iconPath='${CMAKE_SOURCE_DIR}/assets/sprites/logo.ico';
-        $s=(New-Object -COMObject WScript.Shell).CreateShortcut($shortcutPath);
-        $s.IconLocation=$iconPath;
-        $s.Save()"
-        OUTPUT_VARIABLE ICON_OUTPUT
-        RESULT_VARIABLE ICON_RESULT
 )

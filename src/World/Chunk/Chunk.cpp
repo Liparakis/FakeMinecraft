@@ -1,6 +1,5 @@
 #include "Chunk.h"
 #include "ChunkUtils.h"
-#include <GL/glew.h>
 #include <glm/gtc/type_ptr.hpp>
 #include "Planet.h"
 #include "WorldGen.h"
@@ -34,26 +33,7 @@ Chunk::~Chunk() {
     if (chunkThread.joinable())
         chunkThread.join();
 
-    // Clean up merged VAOs
-    if (mergedWorldVAO) {
-        glDeleteBuffers(1, &mergedWorldVBO);
-        glDeleteBuffers(1, &mergedWorldEBO);
-        glDeleteVertexArrays(1, &mergedWorldVAO);
-    }
-    if (mergedBillboardVAO) {
-        glDeleteBuffers(1, &mergedBillboardVBO);
-        glDeleteBuffers(1, &mergedBillboardEBO);
-        glDeleteVertexArrays(1, &mergedBillboardVAO);
-    }
-    if (mergedWaterVAO) {
-        glDeleteBuffers(1, &mergedWaterVBO);
-        glDeleteBuffers(1, &mergedWaterEBO);
-        glDeleteVertexArrays(1, &mergedWaterVAO);
-    }
-
-    if (queryID != 0) {
-        glDeleteQueries(1, &queryID);
-    }
+    releaseMeshes();
 }
 
 void Chunk::reset(ChunkPos newPos) {
@@ -62,31 +42,7 @@ void Chunk::reset(ChunkPos newPos) {
         chunkThread.join();
     }
 
-    // Clean up existing GL resources
-    if (mergedWorldVAO) {
-        glDeleteBuffers(1, &mergedWorldVBO);
-        glDeleteBuffers(1, &mergedWorldEBO);
-        glDeleteVertexArrays(1, &mergedWorldVAO);
-        mergedWorldVAO = 0;
-        mergedWorldVBO = 0;
-        mergedWorldEBO = 0;
-    }
-    if (mergedBillboardVAO) {
-        glDeleteBuffers(1, &mergedBillboardVBO);
-        glDeleteBuffers(1, &mergedBillboardEBO);
-        glDeleteVertexArrays(1, &mergedBillboardVAO);
-        mergedBillboardVAO = 0;
-        mergedBillboardVBO = 0;
-        mergedBillboardEBO = 0;
-    }
-    if (mergedWaterVAO) {
-        glDeleteBuffers(1, &mergedWaterVBO);
-        glDeleteBuffers(1, &mergedWaterEBO);
-        glDeleteVertexArrays(1, &mergedWaterVAO);
-        mergedWaterVAO = 0;
-        mergedWaterVBO = 0;
-        mergedWaterEBO = 0;
-    }
+    releaseMeshes();
 
     // Reset position and state
     chunkPos = newPos;
@@ -123,14 +79,7 @@ void Chunk::reset(ChunkPos newPos) {
     // Reset flags
     ready = false;
     generated = false;
-    occlusionVisible = true;
-    queryIssued = false;
-    occlusionCounter = 0;
-    occlusionScore = 1.0f;
     cachedDistSq = 0.0f;
-    mergedWorldTriangles = 0;
-    mergedBillboardTriangles = 0;
-    mergedWaterTriangles = 0;
     listIndex = 0;
 
     // Clear vertex buffers
@@ -154,10 +103,9 @@ void Chunk::updateBlock(int x, int y, int z, uint8_t newBlock) {
     // Regenerate mesh data
     generateChunkMesh();
 
-    // Use uploadMesh() to regenerate the merged buffers correctly.
+    // Planet::prepare uploads it next frame; the old mesh draws until then.
     ready = false;
     generated = true;
-    uploadMesh();
 
     // Update neighboring chunks if at boundaries
     if (x == 0) {
@@ -189,5 +137,4 @@ void Chunk::updateChunk() {
     generateChunkMesh();
     ready = false;
     generated = true;
-    uploadMesh();
 }

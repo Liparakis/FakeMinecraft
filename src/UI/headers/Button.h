@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include <graphics.h>
+#include "Canvas.h"
 #include <string>
 #include <functional>
 

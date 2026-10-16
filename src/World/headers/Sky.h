@@ -5,9 +5,8 @@
 
 #pragma once
 
-#include <GL/glew.h>
 #include <glm/glm.hpp>
-#include <Shader.h>
+#include "Renderer.h"
 
 /**
  * @class Sky
@@ -24,12 +23,12 @@ public:
     Sky();
     
     /**
-     * @brief Destructor. Cleans up OpenGL textures, buffers, and shaders.
+     * @brief Destructor. GPU resources are owned by the renderer and freed with it.
      */
     ~Sky();
 
     /**
-     * @brief Initialize celestial textures, shader programs, and quad geometry.
+     * @brief Uploads the sun/moon textures and the quad geometry. Needs an initialised renderer.
      */
     void init();
 
@@ -45,11 +44,15 @@ public:
      * Uses additive blending and high-distance translation to ensure celestials appear 
      * behind all world geometry while following the camera.
      * 
-     * @param view The current camera view matrix.
-     * @param projection The current camera projection matrix.
+     * Must run inside the main pass; the projection comes from the frame uniforms.
+     *
+     * @param view The current camera view matrix (used to face the camera).
      * @param cameraPos The world-space position of the camera (used for billboard anchoring).
      */
-    void render(const glm::mat4& view, const glm::mat4& projection, const glm::vec3& cameraPos);
+    void render(const glm::mat4& view, const glm::vec3& cameraPos);
+
+    /// Frees the quad buffer; call before the renderer shuts down.
+    void shutdown();
 
     /** @name Environmental Lighting Parameters (Cached)
      * These values are computed once per frame during update() to minimize CPU overhead.
@@ -97,37 +100,21 @@ private:
     bool paused = false; ///< If true, time progression is halted.
 
     /** @name Resource Data
-     * Handles for textures and shaders.
+     * Handles for textures and geometry.
      * @{
      */
-    Shader* skyShader = nullptr;
-    GLuint sunTexture = 0;
-    GLuint moonTexture = 0;
-    GLuint quadVAO = 0;
-    GLuint quadVBO = 0;
-    /** @} */
+    TextureId sunTexture = 0;
+    TextureId moonTexture = 0;
+    GpuBuffer quad;
+    bool ready = false;
 
-    /**
-     * @brief Loads a single image file into an OpenGL texture with nearest filtering.
-     */
-    void loadTexture(const char* path, GLuint& texID);
-
-    /**
-     * @brief Generates the shared 2D quad geometry used for both sun and moon.
-     */
-    void initQuad();
-
-    /**
-     * @brief Centralized logic for interpolating lighting and colors based on the sun's height.
-     * This is called automatically by update().
-     */
+    TextureId loadTexture(const char* path);
     void updateCachedValues();
 
     /**
      * @brief Internal helper to render a single billboard at a fixed distance.
      * Performs camera-facing rotation and applies brightness scaling.
      */
-    void renderBillboard(GLuint texture, const glm::vec3& direction, float size,
-                         const glm::mat4& view, const glm::mat4& projection,
-                         const glm::vec3& cameraPos, float brightness);
+    void renderBillboard(TextureId texture, const glm::vec3& direction, float size,
+                         const glm::mat4& view, const glm::vec3& cameraPos, float brightness);
 };

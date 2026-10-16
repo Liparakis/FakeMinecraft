@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Shader.h>
+#include "Renderer.h"
 #include <thread>
 #include <vector>
 #include <glm/glm.hpp>
@@ -25,16 +25,10 @@ struct LiquidFace {
 
 // Divides the chunk into smaller sections to help with performance.
 struct SubChunk {
-    unsigned int worldVAO{}, waterVAO{}, billboardVAO{};
-    unsigned int worldVBO{}, worldEBO{}, liquidVBO{}, liquidEBO{}, billboardVBO{}, billboardEBO{};
     unsigned int numTrianglesWorld{}, numTrianglesLiquid{}, numTrianglesBillboard{};
     glm::vec3 cullingCenter;
     glm::vec3 cullingExtents;
     bool ready = false;
-
-    [[nodiscard]] bool hasSolid() const { return numTrianglesWorld > 0 && worldVAO != 0; }
-    [[nodiscard]] bool hasBillboard() const { return numTrianglesBillboard > 0 && billboardVAO != 0; }
-    [[nodiscard]] bool hasWater() const { return numTrianglesLiquid > 0 && waterVAO != 0; }
 };
 
 class Chunk {
@@ -93,6 +87,8 @@ public:
     void renderAllSolid();
     void renderAllBillboard() const;
     void renderAllWater() const;
+    /// Frees the GPU meshes once in-flight frames are done with them.
+    void releaseMeshes();
 
     // ========================================================================
     // BLOCK OPERATIONS (Chunk.cpp)
@@ -112,9 +108,10 @@ public:
     // ========================================================================
     // UTILITY FUNCTIONS
     // ========================================================================
-    [[nodiscard]] bool hasSolid() const { return mergedWorldTriangles > 0; }
-    [[nodiscard]] bool hasBillboard() const { return mergedBillboardTriangles > 0; }
-    [[nodiscard]] bool hasWater() const { return mergedWaterTriangles > 0; }
+    [[nodiscard]] bool hasSolid() const { return static_cast<bool>(worldMesh); }
+    [[nodiscard]] bool hasBillboard() const { return static_cast<bool>(billboardMesh); }
+    [[nodiscard]] bool hasWater() const { return static_cast<bool>(waterMesh); }
+    [[nodiscard]] bool hasMesh() const { return hasSolid() || hasBillboard() || hasWater(); }
 
     // ========================================================================
     // PUBLIC MEMBER VARIABLES
@@ -136,23 +133,11 @@ public:
     glm::vec3 cullingCenter;
     glm::vec3 cullingExtents;
 
-    // Merged VAOs - single draw call per geometry type (all sub-chunks combined)
-    unsigned int mergedWorldVAO{}, mergedWorldVBO{}, mergedWorldEBO{};
-    unsigned int mergedBillboardVAO{}, mergedBillboardVBO{}, mergedBillboardEBO{};
-    unsigned int mergedWaterVAO{}, mergedWaterVBO{}, mergedWaterEBO{};
-    unsigned int mergedWorldTriangles{}, mergedBillboardTriangles{}, mergedWaterTriangles{};
+    // One GPU mesh per geometry type, so each is a single draw call.
+    GpuMesh worldMesh, billboardMesh, waterMesh;
 
     // Sub-chunk data (kept for potential future per-sub-chunk culling)
     SubChunk subChunks[NUM_SUBCHUNKS];
-
-    // Variables for checking if the chunk is hidden behind something else.
-    unsigned int queryID = 0;
-    bool queryIssued = false; 
-    bool occlusionVisible = true; 
-    
-    // Counters to help smoothly hide and show the chunk.
-    int occlusionCounter = 0;      
-    float occlusionScore = 1.0f;   
 
 private:
     glm::vec3 worldPos;

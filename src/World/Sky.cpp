@@ -54,70 +54,33 @@ namespace {
 
 Sky::Sky() {}
 
-Sky::~Sky() {
-    delete skyShader;
+Sky::~Sky() = default;
 
-    if (sunTexture) glDeleteTextures(1, &sunTexture);
-    if (moonTexture) glDeleteTextures(1, &moonTexture);
-    if (quadVAO) glDeleteVertexArrays(1, &quadVAO);
-    if (quadVBO) glDeleteBuffers(1, &quadVBO);
+void Sky::shutdown() {
+    VkContext::get().destroyLater(quad);
 }
 
 void Sky::init() {
-    skyShader = new Shader("../assets/shaders/sky_vertex_shader.glsl",
-                          "../assets/shaders/sky_fragment_shader.glsl");
-
-    if (skyShader->program == 0) [[unlikely]] {
-        std::cerr << "[Sky] Critical: Shader failed to compile!" << std::endl;
-    }
-
-    loadTexture("../assets/sprites/blocks/sun.png", sunTexture);
-    loadTexture("../assets/sprites/blocks/moon.png", moonTexture);
-    initQuad();
-
-    // Initial calculation of the world's lighting state.
+    sunTexture = loadTexture("../assets/sprites/blocks/sun.png");
+    moonTexture = loadTexture("../assets/sprites/blocks/moon.png");
+    quad = Renderer::get().createVertexBuffer(QUAD_VERTICES, sizeof(QUAD_VERTICES));
     updateCachedValues();
 }
 
-void Sky::loadTexture(const char* path, GLuint& texID) {
+TextureId Sky::loadTexture(const char* path) {
     int width, height, channels;
     stbi_set_flip_vertically_on_load(true);
     unsigned char* data = stbi_load(path, &width, &height, &channels, 4);
-
     if (!data) [[unlikely]] {
         std::cerr << "[Sky] Failed to load texture: " << path << std::endl;
-        return;
+        return 0;
     }
-
-    glGenTextures(1, &texID);
-    glBindTexture(GL_TEXTURE_2D, texID);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-
-    // Nearest filtering is used so the textures look blocky and match the game.
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glBindTexture(GL_TEXTURE_2D, 0);
+    const TextureId id = Renderer::get().createTexture(width, height, VK_FORMAT_R8G8B8A8_UNORM, data, false);
     stbi_image_free(data);
+    ready = true;
+    return id;
 }
 
-void Sky::initQuad() {
-    glGenVertexArrays(1, &quadVAO);
-    glGenBuffers(1, &quadVBO);
-    glBindVertexArray(quadVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(QUAD_VERTICES), QUAD_VERTICES, GL_STATIC_DRAW);
-
-    // Layout: [Pos: 3f][UV: 2f]
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glBindVertexArray(0);
-}
 
 void Sky::update(float deltaTime) {
     if (paused) [[unlikely]] return;
@@ -183,53 +146,32 @@ void Sky::updateCachedValues() {
     }
 }
 
-void Sky::render(const glm::mat4& view, const glm::mat4& projection, const glm::vec3& cameraPos) {
-    if (!sunTexture || !moonTexture || !quadVAO || !skyShader || skyShader->program == 0) [[unlikely]] {
-        return;
-    }
+void Sky::render(const glm::mat4& view, const glm::vec3& cameraPos) {
+    if (!ready || !quad) [[unlikely]] return;
 
-    // Optimization: Use pre-cached direction vector.
     const glm::vec3& sunDir = cachedSunDirection;
     const glm::vec3 moonDir = -sunDir;
 
-    // Calculate billboard Opacity (fade celestials near horizons)
+    // Fade the bodies in and out around the horizon.
     const float sunBrightness = (cachedSunHeight < 0.0f)
         ? glm::clamp(-cachedSunHeight * 2.0f, 0.0f, 1.0f) : 0.0f;
     const float moonBrightness = (cachedSunHeight > 0.0f)
         ? glm::clamp(cachedSunHeight * 2.0f, 0.0f, 0.8f) : 0.0f;
 
-    if (sunBrightness <= 0.01f && moonBrightness <= 0.01f) [[unlikely]] {
-        return;
+    if (sunBrightness <= 0.01f && moonBrightness <= 0.01f) [[unlikely]] return;
+
+    // Additive blending so they look like they're glowing; no depth so the world draws over them.
+    Renderer::get().bindPipeline(PipelineId::Sky);
+    if (sunBrightness > 0.01f) {
+        renderBillboard(sunTexture, -sunDir, 80.0f, view, cameraPos, sunBrightness);
     }
-
-    // Batch GL state changes for celestial rendering
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_ONE, GL_ONE); // Using additive blending so they look like they're glowing.
-    glDisable(GL_CULL_FACE);
-
-    skyShader->use();
-    (*skyShader)["view"] = view;
-    (*skyShader)["projection"] = projection;
-
-    // Drawcelestials opposite each other.
-    if (sunBrightness > 0.01f) [[likely]] {
-        renderBillboard(sunTexture, -sunDir, 80.0f, view, projection, cameraPos, sunBrightness);
+    if (moonBrightness > 0.01f) {
+        renderBillboard(moonTexture, -moonDir, 60.0f, view, cameraPos, moonBrightness);
     }
-    if (moonBrightness > 0.01f) [[likely]] {
-        renderBillboard(moonTexture, -moonDir, 60.0f, view, projection, cameraPos, moonBrightness);
-    }
-
-    glEnable(GL_DEPTH_TEST);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_BLEND);
-    glEnable(GL_CULL_FACE);
 }
 
-void Sky::renderBillboard(GLuint texture, const glm::vec3& direction, float size,
-                          const glm::mat4& view, const glm::mat4& projection,
-                          const glm::vec3& cameraPos, float brightness) {
-    // Project the billboard far into the distance.
+void Sky::renderBillboard(const TextureId texture, const glm::vec3& direction, const float size,
+                          const glm::mat4& view, const glm::vec3& cameraPos, const float brightness) {
     const glm::vec3 billboardPos = cameraPos + direction * 500.0f;
 
     // The camera's vectors are extracted so the sun and moon always face the player.
@@ -244,16 +186,13 @@ void Sky::renderBillboard(GLuint texture, const glm::vec3& direction, float size
     model[2] = glm::vec4(forward * size, 0.0f);
     model[3] = glm::vec4(billboardPos, 1.0f);
 
-    (*skyShader)["model"] = model;
-    (*skyShader)["brightness"] = brightness;
+    struct {
+        glm::mat4 model;
+        float brightness;
+    } push{model, brightness};
 
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    (*skyShader)["skyTex"] = 1;
-
-    glBindVertexArray(quadVAO);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-    glBindVertexArray(0);
-
-    glActiveTexture(GL_TEXTURE0);
+    Renderer& renderer = Renderer::get();
+    renderer.bindTexture(texture);
+    renderer.pushConstants(&push, sizeof(push));
+    renderer.draw(quad, 6);
 }

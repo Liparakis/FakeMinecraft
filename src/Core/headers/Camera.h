@@ -1,5 +1,4 @@
 #pragma once
-#include <GL/glew.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -106,7 +105,7 @@ public:
 	 * @param yoffset Delta movement in Y.
 	 * @param constrainPitch Whether to clamp vertical rotation to prevent flipping.
 	 */
-	void processMouseMovement(float xoffset, float yoffset, GLboolean constrainPitch = true);
+	void processMouseMovement(float xoffset, float yoffset, bool constrainPitch = true);
 
 private:
 	/**

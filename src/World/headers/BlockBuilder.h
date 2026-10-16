@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <cstdio>
+
 #include "Block.h"
 
 /**
@@ -21,22 +23,22 @@ public:
      * @param name The unique name of the block.
      */
     BlockBuilder(const char* name) {
-        strncpy_s(block.blockName, name, 31); block.blockName[31] = '\0';
+        std::snprintf(block.blockName, sizeof(block.blockName), "%s", name);
         block.blockType = Block::SOLID; // Default
         
         // Default texture name = block name
-        strncpy_s(block.topTexName, name, 31); block.topTexName[31] = '\0';
-        strncpy_s(block.bottomTexName, name, 31); block.bottomTexName[31] = '\0';
-        strncpy_s(block.sideTexName, name, 31); block.sideTexName[31] = '\0';
+        std::snprintf(block.topTexName, sizeof(block.topTexName), "%s", name);
+        std::snprintf(block.bottomTexName, sizeof(block.bottomTexName), "%s", name);
+        std::snprintf(block.sideTexName, sizeof(block.sideTexName), "%s", name);
     }
 
     /**
      * @brief Sets all 6 faces to use the same texture.
      */
     BlockBuilder& setTexture(const char* texName) {
-        strncpy_s(block.topTexName, texName, 31); block.topTexName[31] = '\0';
-        strncpy_s(block.bottomTexName, texName, 31); block.bottomTexName[31] = '\0';
-        strncpy_s(block.sideTexName, texName, 31); block.sideTexName[31] = '\0';
+        std::snprintf(block.topTexName, sizeof(block.topTexName), "%s", texName);
+        std::snprintf(block.bottomTexName, sizeof(block.bottomTexName), "%s", texName);
+        std::snprintf(block.sideTexName, sizeof(block.sideTexName), "%s", texName);
         return *this;
     }
 
@@ -44,9 +46,9 @@ public:
      * @brief Manually sets different textures for Top, Bottom, and Sides.
      */
     BlockBuilder& setTextures(const char* top, const char* bottom, const char* side) {
-        strncpy_s(block.topTexName, top, 31); block.topTexName[31] = '\0';
-        strncpy_s(block.bottomTexName, bottom, 31); block.bottomTexName[31] = '\0';
-        strncpy_s(block.sideTexName, side, 31); block.sideTexName[31] = '\0';
+        std::snprintf(block.topTexName, sizeof(block.topTexName), "%s", top);
+        std::snprintf(block.bottomTexName, sizeof(block.bottomTexName), "%s", bottom);
+        std::snprintf(block.sideTexName, sizeof(block.sideTexName), "%s", side);
         return *this;
     }
 

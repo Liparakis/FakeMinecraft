@@ -1,9 +1,10 @@
 #pragma once
 
-#include <Graphics.h>
+#include "../../Platform/Platform.h"
+#include "Renderer.h"
+#include "Canvas.h"
 #include "Camera.h"
 #include "Planet.h"
-#include <Shader.h>
 #include <string>
 #include <glm/gtc/type_ptr.hpp>
 #include "CheckBox.h"
@@ -45,7 +46,7 @@ struct GameState {
  * @class GameObject
  * @brief The central controller class for the game engine, following the Singleton pattern.
  * 
- * GameObject manages the main game loop, initialization of all subsystems (Graphics, Shaders, UI, Planet),
+ * GameObject manages the main game loop, initialization of all subsystems (window, renderer, UI, Planet),
  * and high-level logic like input handling, rendering orchestration, and block interaction.
  * 
  * The class organizes variables so that frequently used data (like the Camera)
@@ -63,10 +64,8 @@ public:
     static GameObject &getInstance(float x, float y, const std::string &windowName);
 
     /**
-     * @brief Initializes the entire game world and enters the main loop.
-     * 
-     * Sets up graphics, shaders, UI elements, the planet, and binds all necessary 
-     * callbacks for rendering and logic updates.
+     * @brief Initializes the entire game world, runs the main loop until the window closes,
+     * then shuts every subsystem down in reverse order.
      */
     void init();
 
@@ -83,27 +82,26 @@ private:
      */
     GameObject(float x, float y, std::string windowName);
     
-    /**
-     * @brief Destructor for GameObject. Handles resource cleanup including VAOs/VBOs and Shaders.
-     */
-    ~GameObject();
+    ~GameObject() = default;
 
     /** @name Initialization Helpers @{ */
     void initializeGraphics();
-    void initializeShaders();
     void initializeUIElements();
-    void initializeOutlineVAO();
+    void initializeOutlineMesh();
     void initializePlayerModel();
+    void shutdown();
     /** @} */
 
     /** @name Live Update Systems @{ */
-    /// Updates all active shaders with current frame matrices and lighting data.
-    void updateShaders();
-    /// Configures global OpenGL state (Depth, Blending, Culling) for the current frame.
-    void setupRenderingState() const;
+    /// Records and submits one frame: shadow, reflection, main and UI passes.
+    void renderFrame();
+    /// Light-space matrix for the shadow map, snapped to texels so shadows don't shimmer.
+    [[nodiscard]] glm::mat4 computeLightSpace() const;
+    /// Re-lays out the UI after the window changed size.
+    void onResize();
     /// Updates the window title with performance metrics (FPS, Chunk Count).
     static void updateWindowTitle();
-    /// Synchronizes the graphics engine with the user-selected FPS cap or VSync.
+    /// Applies the FPS cap / VSync choice from the settings menu.
     void updateFPSSettings() const;
     /// Updates player physics (gravity, collision) when noclip is disabled.
     void updatePlayerPhysics(float deltaTime);
@@ -112,13 +110,13 @@ private:
     /** @name Input Callbacks @{ */
     void mouseCallBack();
     void keyboardCallBack(float deltaTime);
-    void handlePlayingMouseInput(const graphics::MouseState &ms);
-    void handlePausedMouseInput(const graphics::MouseState &ms);
+    void handlePlayingMouseInput(const platform::MouseState &ms);
+    void handlePausedMouseInput(const platform::MouseState &ms);
     /** @} */
 
     /** @name Rendering Layers @{ */
     void renderUI() const;
-    void renderBlockOutline(unsigned int outlineVAO);
+    void renderBlockOutline();
     void renderFluidOverlay() const;
     void renderCrosshair() const;
     void renderDebugInfo() const;
@@ -184,20 +182,9 @@ private:
     bool uncapSpeedEnabled = false;
     /** @} */
 
-    /** @name Player Model @{ */
-    unsigned int playerModelVAO = 0;
-    unsigned int playerModelVBO = 0;
-    unsigned int playerModelEBO = 0;
-    unsigned int playerModelIndexCount = 0;
-    Shader* playerModelShader = nullptr;
-    /** @} */
-
-    /** @name Shader Handles @{ */
-    Shader* worldShader = nullptr;
-    Shader* billboardShader = nullptr;
-    Shader* fluidShader = nullptr;
-    Shader* outlineShader = nullptr;
-    Shader* bboxShader = nullptr;
+    /** @name GPU Meshes @{ */
+    GpuMesh playerModel;
+    GpuBuffer outlineVertices;
     /** @} */
 
     /// @brief Manages the day/night cycle and atmospheric rendering.
@@ -225,23 +212,7 @@ private:
     bool simpleLightingEnabled = false;
     /** @} */
 
-    /** @name Resource Identifiers @{ */
     std::string window_name;
-    unsigned int outlineVAO = 0;
-    unsigned int outlineVBO = 0;
-
-    // Multi-Sampling for smoother edges
-    unsigned int multisampledFBO = 0;
-    unsigned int rbo = 0;
-    unsigned int intermediateFBO = 0;
-    unsigned int intermediateRBO = 0;
-    unsigned int screenTexture = 0; // The final texture to blit to
-    
-    // Shadow Shader
-    Shader* shadowShader = nullptr;
-    
-    void initializeMSAA();
-    /** @} */
 };
 
 // ============================================================================

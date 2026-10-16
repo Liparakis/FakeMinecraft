@@ -2,7 +2,7 @@
  * @file CheckBox.cpp
  * @brief Implementation of a simple UI checkbox.
  */
-#include "Checkbox.h"
+#include "CheckBox.h"
 
 
 Checkbox::Checkbox() : x(400), y(300), size(50), checked(false) {
@@ -16,7 +16,7 @@ Checkbox::Checkbox(float x, float y, float size)
  * @brief Draws the checkbox on the screen using a few rectangles.
  */
 void Checkbox::draw() const {
-    graphics::Brush br;
+    ui::Brush br;
     br.fill_opacity = 0.2f;
     br.fill_color[0] = 0.15f;
     br.fill_color[1] = 0.15f;
@@ -25,14 +25,14 @@ void Checkbox::draw() const {
     br.outline_color[0] = 1.0f;
     br.outline_color[1] = 1.0f;
     br.outline_color[2] = 1.0f;
-    drawRect(x, y, size, size, br);
+    ui::drawRect(x, y, size, size, br);
 
     br.fill_opacity = 0.1f;
     br.fill_color[0] = 0.0f;
     br.fill_color[1] = 0.0f;
     br.fill_color[2] = 0.0f;
     const float lilSmaller = size * 0.95;
-    drawRect(x, y, lilSmaller, lilSmaller, br);
+    ui::drawRect(x, y, lilSmaller, lilSmaller, br);
 
     // Border for clarity
     br.fill_opacity = 0.0f;
@@ -40,7 +40,7 @@ void Checkbox::draw() const {
     br.outline_color[0] = 0.8f;
     br.outline_color[1] = 0.8f;
     br.outline_color[2] = 0.8f;
-    drawRect(x, y, size, size, br);
+    ui::drawRect(x, y, size, size, br);
 
     // Draw the checkmark if checked
     if (checked) {
@@ -48,8 +48,8 @@ void Checkbox::draw() const {
         br.outline_color[0] = 0.0f;
         br.outline_color[1] = 1.0f;
         br.outline_color[2] = 0.0f;
-        drawLine(x - size / 4, y, x, y + size / 4, br);
-        drawLine(x, y + size / 4, x + size / 4, y - size / 4, br);
+        ui::drawLine(x - size / 4, y, x, y + size / 4, br);
+        ui::drawLine(x, y + size / 4, x + size / 4, y - size / 4, br);
     }
 }
 

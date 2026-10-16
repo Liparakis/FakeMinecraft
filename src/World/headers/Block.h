@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstdio>
 #include <cstring>
 
 /**
@@ -70,9 +71,9 @@ public:
      * @param type The physical and render category.
      */
     Block(const char* name, BLOCK_TYPE type) : blockType(type) {
-         strncpy_s(blockName, name, 31); blockName[31] = '\0';
-         strncpy_s(topTexName, name, 31); topTexName[31] = '\0';
-         strncpy_s(bottomTexName, name, 31); bottomTexName[31] = '\0';
-         strncpy_s(sideTexName, name, 31); sideTexName[31] = '\0';
+         std::snprintf(blockName, sizeof(blockName), "%s", name);
+         std::snprintf(topTexName, sizeof(topTexName), "%s", name);
+         std::snprintf(bottomTexName, sizeof(bottomTexName), "%s", name);
+         std::snprintf(sideTexName, sizeof(sideTexName), "%s", name);
     }
 };

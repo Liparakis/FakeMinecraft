@@ -5,7 +5,7 @@
 #pragma once
 #include <string>
 #include <utility>
-#include <graphics.h>
+#include "Canvas.h"
 
 /**
  * @class TypeBox

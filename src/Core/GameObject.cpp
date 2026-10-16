@@ -2,6 +2,9 @@
 #include <iostream>
 #include <algorithm>
 #include <utility>
+#include <cstdio>
+#include <cstdlib>
+#include <stdexcept>
 #include <SDL2/SDL_mouse.h>
 #include "TextureManager.h"
 #include "Blocks.h"
@@ -89,33 +92,11 @@ int convertToASCIIsum(const std::string &input) {
 }
 
 // ============================================================================
-// CONSTRUCTOR / DESTRUCTOR
+// CONSTRUCTOR
 // ============================================================================
 GameObject::GameObject(const float x, const float y, std::string windowName)
     : windowX(x), windowY(y), lastX(x / 2), lastY(y / 2), fpsSlider(), renderDistanceSlider(), seedBox(),
       window_name(std::move(windowName)) {
-}
-
-GameObject::~GameObject() {
-    if (outlineVAO)
-        glDeleteVertexArrays(1, &outlineVAO);
-    if (outlineVBO)
-        glDeleteBuffers(1, &outlineVBO);
-
-    delete worldShader;
-    delete billboardShader;
-    delete fluidShader;
-    delete outlineShader;
-    delete bboxShader;
-    delete shadowShader;
-
-    glDeleteFramebuffers(1, &multisampledFBO);
-    glDeleteTextures(1, &screenTexture); // wait, screenTexture is attached to intermediateFBO
-    glDeleteRenderbuffers(1, &rbo);
-    glDeleteFramebuffers(1, &intermediateFBO);
-
-    graphics::stopMessageLoop();
-    graphics::destroyWindow();
 }
 
 GameObject &GameObject::getInstance(float x, float y, const std::string &windowName) {
@@ -128,258 +109,78 @@ GameObject &GameObject::getInstance(float x, float y, const std::string &windowN
 // ============================================================================
 void GameObject::init() {
     initializeGraphics();
-    initializeShaders();
     initializeUIElements();
-    initializeOutlineVAO();
+    initializeOutlineMesh();
     initializePlayerModel();
 
-    Planet::planet = new Planet(worldShader, fluidShader, billboardShader, bboxShader);
+    Planet::planet = new Planet();
 
-    // Cache frequently accessed values
     cachedWindowCenter.x = windowX * 0.5f;
     cachedWindowCenter.y = windowY * 0.5f;
 
-    // Callbacks are set up here using lambdas.
-    graphics::setPreDrawFunction([ this] {
-        sky.update(1.0f / std::max(graphics::getFPS(), 1.0f));
-        //sky.update(0.1);
-        updateWindowTitle();
+    // FAKEMC_SCREENSHOT=<file.bmp> saves one frame after FAKEMC_SCREENSHOT_AT seconds (default 20) and quits.
+    // FAKEMC_SCREENSHOT_PLAYING=1 closes the start menu first. Used for automated visual checks.
+    const char *screenshotPath = std::getenv("FAKEMC_SCREENSHOT");
+    const char *screenshotAt = std::getenv("FAKEMC_SCREENSHOT_AT");
+    const float screenshotMs = (screenshotAt ? std::strtof(screenshotAt, nullptr) : 20.0f) * 1000.0f;
+    bool screenshotTaken = false;
+    if (screenshotPath && std::getenv("FAKEMC_SCREENSHOT_PLAYING")) gameState.state = PLAYING;
+    // FAKEMC_CAMERA="x,y,z,yaw,pitch" starts the camera at a fixed view, for repeatable visual checks.
+    if (const char *view = std::getenv("FAKEMC_CAMERA")) {
+        float x, y, z, yaw, pitch;
+        if (std::sscanf(view, "%f,%f,%f,%f,%f", &x, &y, &z, &yaw, &pitch) == 5) {
+            camera.Position = glm::vec3(x, y, z);
+            camera.Yaw = yaw;
+            camera.Pitch = pitch;
+            camera.processMouseMovement(0.0f, 0.0f);
+            cachedMatrices.dirty = true;
+        }
+    }
+    // FAKEMC_RESIZE="WxH" resizes the window halfway to the screenshot; FAKEMC_MSAA=0 starts with MSAA off.
+    // Both exercise swapchain and pipeline rebuilds in automated checks.
+    int resizeW = 0, resizeH = 0;
+    if (const char *resize = std::getenv("FAKEMC_RESIZE")) std::sscanf(resize, "%dx%d", &resizeW, &resizeH);
+    if (const char *msaa = std::getenv("FAKEMC_MSAA"); msaa && msaa[0] == '0') {
+        msaaEnabled = false;
+        msaaBox.setChecked(false);
+    }
+    // FAKEMC_FPS_CAP overrides the starting FPS setting (55 = VSync, above 360 = uncapped).
+    if (const char *cap = std::getenv("FAKEMC_FPS_CAP")) fpsCap = std::atoi(cap);
+    if (!screenshotPath) {
+        platform::playMusic("../assets/sounds/songs/Minecraft Volume Alpha.ogg", GameConstants::MUSIC_VOLUME, true);
+    }
 
-        // 0. Reflection Pass
-        // -----------------------------------------------------------------
-        Planet::planet->renderReflection(
-            camera.Position,
-            camera.Front,
-            static_cast<float>(windowX) / static_cast<float>(windowY)
-        );
+    while (platform::pumpEvents()) {
+        if (platform::consumeResized()) onResize();
 
-        // Reset Viewport for Shadow Pass
-        // Shadow pass sets its own viewport, but we should be careful.
-
-        if (dynamicShadowsEnabled && !simpleLightingEnabled) {
-            // 1. Shadow Pass
-            // -----------------------------------------------------------------
-            const float shadowDist = Planet::planet->shadowDistance;
-
-            // Position light source based on sky/sun
-            glm::vec3 sunTo = -sky.getSunDirection();
-
-            // The sun's angle is snapped to certain steps to prevent jittering during movement.
-            // This ensures the light-space basis doesn't rotate continuously, which would cause jumpy shadows.
-            const float angleQuantization = glm::radians(0.5f); // 0.5 degree steps
-
-            // Convert to spherical coordinates
-            float sunLength = glm::length(sunTo);
-            if (sunLength > 0.0001f) {
-                glm::vec3 sunNorm = sunTo / sunLength;
-
-                // Calculate azimuth (XZ plane angle) and elevation (Y angle)
-                float azimuth = std::atan2(sunNorm.z, sunNorm.x);
-                float elevation = std::asin(sunNorm.y);
-
-                // Quantize angles
-                azimuth = std::round(azimuth / angleQuantization) * angleQuantization;
-                elevation = std::round(elevation / angleQuantization) * angleQuantization;
-
-                // Reconstruct quantized sun direction
-                float cosElev = std::cos(elevation);
-                sunTo = glm::vec3(
-                            std::cos(azimuth) * cosElev,
-                            std::sin(elevation),
-                            std::sin(azimuth) * cosElev
-                        ) * sunLength;
-            }
-
-            // Choose up vector that avoids degeneracy when sun is near zenith
-            glm::vec3 lightUp = glm::vec3(0.0f, 1.0f, 0.0f);
-            if (std::abs(glm::dot(glm::normalize(sunTo), lightUp)) > 0.99f) {
-                lightUp = glm::vec3(0.0f, 0.0f, 1.0f);
-            }
-
-            // The shadow center is snapped to the texel grid to maintain stable shadows.
-            // This calculates the world-space size of one shadow texel.
-            const float worldUnitsPerTexel = (2.0f * shadowDist) / static_cast<float>(Planet::planet->SHADOW_WIDTH);
-
-            // Build orthonormal basis for light space (matching lookAt)
-            glm::vec3 lightDir = glm::normalize(-sunTo);
-            glm::vec3 lightRight = glm::normalize(glm::cross(lightUp, lightDir));
-            glm::vec3 lightFinalUp = glm::cross(lightDir, lightRight);
-
-            // Project camera position onto light-space XY plane (ignore Z, that's depth)
-            glm::vec3 shadowCenter = camera.Position;
-            float centerX = glm::dot(shadowCenter, lightRight);
-            float centerY = glm::dot(shadowCenter, lightFinalUp);
-
-            // Snap to texel grid in world space
-            centerX = glm::floor(centerX / worldUnitsPerTexel) * worldUnitsPerTexel;
-            centerY = glm::floor(centerY / worldUnitsPerTexel) * worldUnitsPerTexel;
-
-            // Reconstruct snapped world position (preserve depth component)
-            float centerZ = glm::dot(shadowCenter, lightDir);
-            glm::vec3 snappedCenter = lightRight * centerX + lightFinalUp * centerY + lightDir * centerZ;
-
-            // Build view matrix with snapped center
-            const glm::mat4 lightView = glm::lookAt(snappedCenter + sunTo * 100.0f, snappedCenter, lightUp);
-            const glm::mat4 lightProjection = glm::ortho(-shadowDist, shadowDist, -shadowDist, shadowDist, -4000.0f,
-                                                         4000.0f);
-
-            Planet::planet->lightSpaceMatrix = lightProjection * lightView;
-
-            glViewport(0, 0, Planet::planet->SHADOW_WIDTH, Planet::planet->SHADOW_HEIGHT);
-            glBindFramebuffer(GL_FRAMEBUFFER, Planet::planet->depthMapFBO);
-            glDepthMask(GL_TRUE); // Required to ensure glClear works!
-            glEnable(GL_DEPTH_TEST);
-            glDisable(GL_SCISSOR_TEST);
-            glClearDepth(1.0f); // Shadows need depth 1.0 (far), unlike main pass (0.0/reversed-z or standard)
-            glClear(GL_DEPTH_BUFFER_BIT);
-            glDepthFunc(GL_LESS); // Shadow map uses standard depth
-
-            // Disable culling to ensure all geometry casts shadows (especially thin pillars)
-            glDisable(GL_CULL_FACE);
-
-            // A polygon offset is used to prevent shadow acne (those weird stripes).
-            glEnable(GL_POLYGON_OFFSET_FILL);
-            glPolygonOffset(2.0f, 2.0f);
-
-            // Bind Texture Array for Beta Alpha Testing in Shadow Shader
-            // Note: This relies on shadowShader using binding=0 for 'tex' or being set via uniform
-            glActiveTexture(GL_TEXTURE0);
-            const GLuint texArrayID = TextureManager::getInstance().getTextureArrayID();
-            glBindTexture(GL_TEXTURE_2D_ARRAY, texArrayID);
-
-            shadowShader->use();
-            (*shadowShader)["lightSpaceMatrix"] = Planet::planet->lightSpaceMatrix;
-            Planet::planet->renderShadows(shadowShader);
-
-
-            glDisable(GL_POLYGON_OFFSET_FILL);
-            glEnable(GL_CULL_FACE); // Re-enable for main rendering
-
-            glCullFace(GL_BACK);
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        } else {
-            // Shadow pass disabled: clear shadow map to white (no shadow)
-            glBindFramebuffer(GL_FRAMEBUFFER, Planet::planet->depthMapFBO);
-            glViewport(0, 0, Planet::planet->SHADOW_WIDTH, Planet::planet->SHADOW_HEIGHT);
-            glClearDepth(1.0f);
-            glClear(GL_DEPTH_BUFFER_BIT);
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        if (resizeW > 0 && platform::timeMs() >= screenshotMs * 0.5f) {
+            SDL_SetWindowSize(platform::window(), resizeW, resizeH);
+            resizeW = 0;
+        }
+        if (screenshotPath && platform::timeMs() >= screenshotMs) {
+            if (screenshotTaken) break;
+            Renderer::get().requestScreenshot(screenshotPath);
+            screenshotTaken = true;
         }
 
-        // 2. Main Render Pass (MSAA or Standard)
-        // -----------------------------------------------------------------
-        glViewport(0, 0, windowX, windowY);
-        glBindFramebuffer(GL_FRAMEBUFFER, msaaEnabled ? multisampledFBO : intermediateFBO);
-        glClearColor(sky.getSkyColor().r, sky.getSkyColor().g, sky.getSkyColor().b, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        // Texture binding is performed here.
-        glActiveTexture(GL_TEXTURE0);
-        const GLuint texArrayID = TextureManager::getInstance().getTextureArrayID();
-        glBindTexture(GL_TEXTURE_2D_ARRAY, texArrayID);
-
-        // Bind shadow map
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, Planet::planet->depthMap);
-
-        // Bind reflection map
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, Planet::planet->reflectionTexture);
-
-        setupRenderingState(); // Reset state (depth test, etc)
-        updateFPSSettings();
-        updateShaders(); // Updates lightSpaceMatrix uniform in world shader
-
-        // Disable clipping for main pass - Use (0,0,0,1) to ensure dot product is positive (1.0)
-        // Using (0,0,0,0) results in gl_ClipDistance = 0.0 which is undefined/z-fighting boundary on some drivers.
-        worldShader->use();
-        (*worldShader)["clipPlane"] = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
-        billboardShader->use();
-        (*billboardShader)["clipPlane"] = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
-
-        sky.render(cachedMatrices.view, cachedMatrices.projection, camera.Position);
-
-        // CRITICAL: sky.render() overwrites GL_TEXTURE1 with sun/moon texture.
-        // Re-bind shadow map AFTER sky rendering!
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, Planet::planet->depthMap);
-        glActiveTexture(GL_TEXTURE0);
-
-        const glm::vec3 &updatePos = freecamActive ? savedPlayerPosition : camera.Position;
-        Planet::planet->update(updatePos, !freecamActive);
-        renderBlockOutline(outlineVAO);
-
-
-        // 3. Blit to Default Framebuffer
-        // -----------------------------------------------------------------
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, msaaEnabled ? multisampledFBO : intermediateFBO);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); // Blit directly to screen
-        glBlitFramebuffer(0, 0, windowX, windowY, 0, 0, windowX, windowY, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-
-        // Re-bind default framebuffer for UI rendering (which happens in setDrawFunction)
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-        if (freecamActive) [[unlikely]] {
-            renderPlayerModel();
-        }
-
-        SEED = convertToASCIIsum(seedBox.getText());
-    });
-
-    graphics::setResizeFunction([this](const int width, const int height) {
-        windowX = width;
-        windowY = height;
-
-        cachedWindowCenter.x = width * 0.5f;
-        cachedWindowCenter.y = height * 0.5f;
-
-        renderDistanceSlider.setDimensions(cachedWindowCenter.x - 100, cachedWindowCenter.y - 80.0f);
-        fullscreenCheckBox.setDimensions(cachedWindowCenter.x + 50, cachedWindowCenter.y - 100.0f);
-        fpsSlider.setDimensions(cachedWindowCenter.x - 100, cachedWindowCenter.y);
-        seedBox.setDimensions(cachedWindowCenter.x, cachedWindowCenter.y + 65.0f);
-        uncapSpeedBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 110.0f);
-        superJumpBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 150.0f);
-
-        // Update Buttons
-        videoSettingsBtn.setPosition(cachedWindowCenter.x, cachedWindowCenter.y - 30);
-        gameSettingsBtn.setPosition(cachedWindowCenter.x, cachedWindowCenter.y + 30);
-        quitBtn.setPosition(cachedWindowCenter.x, cachedWindowCenter.y + 90);
-        backBtn.setPosition(cachedWindowCenter.x, cachedWindowCenter.y + 220);
-
-        // Update Checkboxes
-        dynamicShadowsBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y - 20);
-        msaaBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 40);
-
-        cachedMatrices.dirty = true;
-
-        // Resize MSAA and Intermediate FBOs
-        if (multisampledFBO)
-            glDeleteFramebuffers(1, &multisampledFBO);
-        if (rbo)
-            glDeleteRenderbuffers(1, &rbo);
-        if (intermediateFBO)
-            glDeleteFramebuffers(1, &intermediateFBO);
-        if (intermediateRBO) // Clean up the depth buffer
-            glDeleteRenderbuffers(1, &intermediateRBO);
-        if (screenTexture) glDeleteTextures(1, &screenTexture);
-
-        initializeMSAA();
-    });
-
-    graphics::setDrawFunction([this] { renderUI(); });
-    graphics::setUpdateFunction([this](const float dt) {
-        keyboardCallBack(dt);
+        const float deltaMs = platform::deltaMs();
+        keyboardCallBack(deltaMs);
         mouseCallBack();
-    });
+        renderFrame();
 
-    graphics::playMusic("../assets/sounds/songs/Minecraft Volume Alpha.ogg",
-                        GameConstants::MUSIC_VOLUME, true);
-    graphics::startMessageLoop();
+        const bool capped = fpsCap != GameConstants::FPS_VSYNC_THRESHOLD && fpsCap <= GameConstants::FPS_MAX_CAPPED;
+        platform::limitFrameRate(capped ? fpsCap : 0);
+    }
+
+    shutdown();
 }
 
 void GameObject::initializeGraphics() {
-    graphics::createWindow(windowX, windowY, "");
-    graphics::setFont("../assets/fonts/Arial.ttf");
+    if (!platform::init(static_cast<int>(windowX), static_cast<int>(windowY), "Fake Minecraft")) {
+        throw std::runtime_error("Failed to create the game window");
+    }
+    Renderer::get().init(platform::window(), true);
+    ui::init("../assets/fonts/arial.ttf");
 
     camera = Camera(glm::vec3(0.0f, MAX_HEIGHT / 2 + 10, 0.0f));
     TextureManager::getInstance().loadTextures("../assets/sprites/blocks");
@@ -388,59 +189,16 @@ void GameObject::initializeGraphics() {
     sky.init();
 }
 
-void GameObject::initializeShaders() {
-    constexpr int slotBound = 0;
+void GameObject::shutdown() {
+    delete Planet::planet;
+    Planet::planet = nullptr;
 
-    worldShader = new Shader("../assets/shaders/world_vertex_shader.glsl",
-                             "../assets/shaders/world_fragment_shader.glsl");
-    (*worldShader)["SMART_tex"] = slotBound;
-
-    billboardShader = new Shader("../assets/shaders/billboard_vertex_shader.glsl",
-                                 "../assets/shaders/billboard_fragment_shader.glsl");
-    (*billboardShader)["SMART_tex"] = slotBound;
-
-    fluidShader = new Shader("../assets/shaders/fluids_vertex_shader.glsl",
-                             "../assets/shaders/fluids_fragment_shader.glsl");
-    (*fluidShader)["SMART_tex"] = slotBound;
-
-    outlineShader = new Shader("../assets/shaders/block_outline_vertex_shader.glsl",
-                               "../assets/shaders/block_outline_fragment_shader.glsl");
-
-    bboxShader = new Shader("../assets/shaders/bbox_vertex.glsl",
-                            "../assets/shaders/bbox_fragment.glsl");
-
-    // Initialize Shadow Shader
-    shadowShader = new Shader("../assets/shaders/shadow_mapping_depth.vert",
-                              "../assets/shaders/shadow_mapping_depth.frag");
-
-    initializeMSAA();
-
-    if (!worldShader->program || !billboardShader->program || !fluidShader->program ||
-        !outlineShader->program || !bboxShader->program || !shadowShader->program) [[unlikely]] {
-        std::cerr << "[CRITICAL] Shader compilation failed!" << std::endl;
-        std::cerr << "World: " << worldShader->program << std::endl;
-        std::cerr << "Billboard: " << billboardShader->program << std::endl;
-        std::cerr << "Fluid: " << fluidShader->program << std::endl;
-        std::cerr << "Outline: " << outlineShader->program << std::endl;
-        std::cerr << "BBox: " << bboxShader->program << std::endl;
-        std::cerr << "Shadow: " << shadowShader->program << std::endl;
-    }
-
-    // Set Shadow Map Uniform
-    worldShader->use();
-    (*worldShader)["tex"] = 0; // Explicitly set tex to slot 0
-    (*worldShader)["shadowMap"] = 1; // Slot 1
-    (*worldShader)["clipPlane"] = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f); // Default: No clipping (+1.0 distance)
-
-    billboardShader->use();
-    (*billboardShader)["tex"] = 0;
-    (*billboardShader)["shadowMap"] = 1;
-    (*billboardShader)["clipPlane"] = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
-
-    fluidShader->use();
-    (*fluidShader)["tex"] = 0;
-    (*fluidShader)["shadowMap"] = 1;
-    (*fluidShader)["reflectionMap"] = 2; // Slot 2
+    Renderer &renderer = Renderer::get();
+    renderer.releaseMesh(playerModel);
+    VkContext::get().destroyLater(outlineVertices);
+    sky.shutdown();
+    renderer.shutdown();
+    platform::shutdown();
 }
 
 void GameObject::initializeUIElements() {
@@ -455,78 +213,160 @@ void GameObject::initializeUIElements() {
     uncapSpeedBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 110.0f, 30);
     superJumpBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 150.0f, 30);
 
-    // Initialize Menu Buttons (Restored)
     videoSettingsBtn = Button(cachedWindowCenter.x, cachedWindowCenter.y - 30, 200, 40, "Video Settings");
     gameSettingsBtn = Button(cachedWindowCenter.x, cachedWindowCenter.y + 30, 200, 40, "Game Settings");
     backBtn = Button(cachedWindowCenter.x, cachedWindowCenter.y + 220, 200, 40, "Back");
     quitBtn = Button(cachedWindowCenter.x, cachedWindowCenter.y + 90, 200, 40, "Quit Game");
 
-    // Initialize Checkboxes (Restored)
     dynamicShadowsBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y - 20, 30);
     msaaBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 40, 30);
     dynamicShadowsBox.setChecked(true);
     msaaBox.setChecked(true);
 }
 
-void GameObject::initializeOutlineVAO() {
-    glGenVertexArrays(1, &outlineVAO);
-    glGenBuffers(1, &outlineVBO);
-    glBindVertexArray(outlineVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, outlineVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(GameConstants::OUTLINE_VERTICES),
-                 GameConstants::OUTLINE_VERTICES, GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
-    glBindVertexArray(0);
+void GameObject::initializeOutlineMesh() {
+    outlineVertices = Renderer::get().createVertexBuffer(GameConstants::OUTLINE_VERTICES,
+                                                         sizeof(GameConstants::OUTLINE_VERTICES));
 }
 
-void GameObject::initializeMSAA() {
-    // Configure MSAA framebuffer
-    glGenFramebuffers(1, &multisampledFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, multisampledFBO);
+void GameObject::onResize() {
+    int width = 0, height = 0;
+    SDL_GetWindowSize(platform::window(), &width, &height);
+    if (width == 0 || height == 0) return;
+    windowX = static_cast<float>(width);
+    windowY = static_cast<float>(height);
 
-    // Create a multisampled color attachment texture
-    unsigned int textureColorBufferMultiSampled;
-    glGenTextures(1, &textureColorBufferMultiSampled);
-    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, textureColorBufferMultiSampled);
-    // 4 samples
-    glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGB, windowX, windowY, GL_TRUE);
-    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE,
-                           textureColorBufferMultiSampled, 0);
+    cachedWindowCenter.x = windowX * 0.5f;
+    cachedWindowCenter.y = windowY * 0.5f;
 
-    // Create a multisampled renderbuffer object for depth and stencil attachments
-    glGenRenderbuffers(1, &rbo);
-    glBindRenderbuffer(GL_RENDERBUFFER, rbo);
-    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_DEPTH24_STENCIL8, windowX, windowY);
-    glBindRenderbuffer(GL_RENDERBUFFER, 0);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rbo);
+    renderDistanceSlider.setDimensions(cachedWindowCenter.x - 100, cachedWindowCenter.y - 80.0f);
+    fullscreenCheckBox.setDimensions(cachedWindowCenter.x + 50, cachedWindowCenter.y - 100.0f);
+    fpsSlider.setDimensions(cachedWindowCenter.x - 100, cachedWindowCenter.y);
+    seedBox.setDimensions(cachedWindowCenter.x, cachedWindowCenter.y + 65.0f);
+    uncapSpeedBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 110.0f);
+    superJumpBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 150.0f);
 
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-        std::cerr << "ERROR::FRAMEBUFFER:: Multisampled Framebuffer is not complete!" << std::endl;
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    videoSettingsBtn.setPosition(cachedWindowCenter.x, cachedWindowCenter.y - 30);
+    gameSettingsBtn.setPosition(cachedWindowCenter.x, cachedWindowCenter.y + 30);
+    quitBtn.setPosition(cachedWindowCenter.x, cachedWindowCenter.y + 90);
+    backBtn.setPosition(cachedWindowCenter.x, cachedWindowCenter.y + 220);
 
-    // Configure intermediate framebuffer
-    glGenFramebuffers(1, &intermediateFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, intermediateFBO);
+    dynamicShadowsBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y - 20);
+    msaaBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 40);
 
-    // Create a color attachment texture
-    glGenTextures(1, &screenTexture);
-    glBindTexture(GL_TEXTURE_2D, screenTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, windowX, windowY, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, screenTexture, 0);
+    cachedMatrices.dirty = true;
+    Renderer::get().onResize();
+}
 
-    // Create a renderbuffer object for depth and stencil attachments (for non-MSAA)
-    glGenRenderbuffers(1, &intermediateRBO);
-    glBindRenderbuffer(GL_RENDERBUFFER, intermediateRBO);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, windowX, windowY);
-    glBindRenderbuffer(GL_RENDERBUFFER, 0);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, intermediateRBO);
+// ============================================================================
+// FRAME
+// ============================================================================
+glm::mat4 GameObject::computeLightSpace() const {
+    const float shadowDist = Planet::planet->shadowDistance;
+    glm::vec3 sunTo = -sky.getSunDirection();
 
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-        std::cerr << "ERROR::FRAMEBUFFER:: Intermediate Framebuffer is not complete!" << std::endl;
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    // The sun's angle is snapped to 0.5 degree steps so the light-space basis doesn't
+    // rotate continuously, which would make shadows crawl.
+    const float angleQuantization = glm::radians(0.5f);
+    const float sunLength = glm::length(sunTo);
+    if (sunLength > 0.0001f) {
+        const glm::vec3 sunNorm = sunTo / sunLength;
+        const float azimuth = std::round(std::atan2(sunNorm.z, sunNorm.x) / angleQuantization) * angleQuantization;
+        const float elevation = std::round(std::asin(sunNorm.y) / angleQuantization) * angleQuantization;
+        const float cosElev = std::cos(elevation);
+        sunTo = glm::vec3(std::cos(azimuth) * cosElev, std::sin(elevation), std::sin(azimuth) * cosElev) * sunLength;
+    }
+
+    // Choose an up vector that avoids degeneracy when the sun is near the zenith.
+    glm::vec3 lightUp(0.0f, 1.0f, 0.0f);
+    if (std::abs(glm::dot(glm::normalize(sunTo), lightUp)) > 0.99f) lightUp = glm::vec3(0.0f, 0.0f, 1.0f);
+
+    // Snap the shadow centre to the texel grid so shadows stay stable while moving.
+    const float worldUnitsPerTexel = (2.0f * shadowDist) / static_cast<float>(Renderer::SHADOW_SIZE);
+    const glm::vec3 lightDir = glm::normalize(-sunTo);
+    const glm::vec3 lightRight = glm::normalize(glm::cross(lightUp, lightDir));
+    const glm::vec3 lightFinalUp = glm::cross(lightDir, lightRight);
+
+    const float centerX = glm::floor(glm::dot(camera.Position, lightRight) / worldUnitsPerTexel) * worldUnitsPerTexel;
+    const float centerY = glm::floor(glm::dot(camera.Position, lightFinalUp) / worldUnitsPerTexel) * worldUnitsPerTexel;
+    const float centerZ = glm::dot(camera.Position, lightDir);
+    const glm::vec3 snappedCenter = lightRight * centerX + lightFinalUp * centerY + lightDir * centerZ;
+
+    const glm::mat4 lightView = glm::lookAt(snappedCenter + sunTo * 100.0f, snappedCenter, lightUp);
+    const glm::mat4 lightProjection = glm::ortho(-shadowDist, shadowDist, -shadowDist, shadowDist, -4000.0f, 4000.0f);
+    return lightProjection * lightView;
+}
+
+void GameObject::renderFrame() {
+    Renderer &renderer = Renderer::get();
+
+    sky.update(platform::deltaMs() * 0.001f);
+    updateWindowTitle();
+    updateFPSSettings();
+    renderer.setMsaa(msaaEnabled);
+    SEED = convertToASCIIsum(seedBox.getText());
+
+    if (!renderer.beginFrame()) return;
+
+    if (cachedMatrices.dirty) [[unlikely]] {
+        cachedMatrices.view = camera.getViewMatrix();
+        // Reverse-Z: near and far are swapped so depth precision is spent close to the camera.
+        cachedMatrices.projection = glm::perspective(glm::radians(90.0f), windowX / windowY, 10000.0f, 0.1f);
+        cachedMatrices.dirty = false;
+    }
+    const glm::mat4 &view = cachedMatrices.view;
+    const glm::mat4 &projection = cachedMatrices.projection;
+    Planet::planet->updateFrustum(freecamActive ? savedViewProjection : projection * view);
+
+    const Planet::ReflectionCamera reflection = Planet::reflectionCamera(camera.Position, camera.Front, windowX / windowY);
+    const glm::mat4 lightSpace = toVulkanClip(computeLightSpace());
+
+    FrameUniforms mainUniforms;
+    mainUniforms.view = view;
+    mainUniforms.projection = toVulkanClip(projection);
+    mainUniforms.lightSpace = lightSpace;
+    mainUniforms.reflectionViewProjection = toVulkanClip(reflection.projection) * reflection.view;
+    mainUniforms.sunDirection = glm::vec4(sky.getSunDirection(), 0.0f);
+    mainUniforms.sunColor = glm::vec4(sky.getSunColor(), 0.0f);
+    mainUniforms.cameraPos = glm::vec4(camera.Position, 1.0f);
+    mainUniforms.ambientStrength = sky.getAmbientStrength();
+    mainUniforms.time = static_cast<float>(SDL_GetTicks()) * 0.001f;
+    mainUniforms.simpleLighting = simpleLightingEnabled ? 1 : 0;
+
+    FrameUniforms reflectionUniforms = mainUniforms;
+    reflectionUniforms.view = reflection.view;
+    reflectionUniforms.projection = toVulkanClip(reflection.projection);
+    reflectionUniforms.clipPlane = Planet::REFLECTION_CLIP_PLANE;
+    renderer.setUniforms(mainUniforms, reflectionUniforms);
+
+    // Chunk uploads are recorded here, before any pass begins.
+    Planet::planet->prepare(freecamActive ? savedPlayerPosition : camera.Position);
+    renderer.finishUploads();
+
+    // With dynamic shadows off the pass still runs, leaving a cleared (shadow-free) map.
+    renderer.beginShadowPass();
+    if (dynamicShadowsEnabled && !simpleLightingEnabled) Planet::planet->renderShadows(lightSpace);
+    renderer.endPass();
+
+    if (Planet::planet->hasVisibleWater()) {
+        renderer.beginReflectionPass(glm::vec3(0.5f, 0.7f, 1.0f));
+        Planet::planet->renderReflection(camera.Position, reflection.projection * reflection.view);
+        renderer.endPass();
+    }
+
+    renderer.beginMainPass(sky.getSkyColor());
+    sky.render(view, camera.Position);
+    Planet::planet->render();
+    renderBlockOutline();
+    if (freecamActive) [[unlikely]] renderPlayerModel();
+    renderer.endPass();
+
+    renderer.beginUIPass();
+    renderUI();
+    ui::flush(windowX, windowY);
+    renderer.endPass();
+
+    renderer.endFrame();
 }
 
 // ============================================================================
@@ -537,16 +377,14 @@ void GameObject::updateWindowTitle() {
     static int lastFPS = -1;
     static int lastChunkCount = -1;
 
-    const int currentFPS = static_cast<int>(graphics::getFPS());
+    const int currentFPS = static_cast<int>(platform::fps());
     const int currentChunks = Planet::planet->numChunks;
 
     if (currentFPS != lastFPS || currentChunks != lastChunkCount) [[unlikely]] {
-        // A static buffer is used to avoid constant string creation.
         static char titleBuffer[128];
-        snprintf(titleBuffer, sizeof(titleBuffer),
-                 "Fake Minecraft / FPS: %d Total Chunks: %d",
+        snprintf(titleBuffer, sizeof(titleBuffer), "Fake Minecraft / FPS: %d Total Chunks: %d",
                  currentFPS, currentChunks);
-        graphics::setWindowName(titleBuffer);
+        platform::setTitle(titleBuffer);
 
         lastFPS = currentFPS;
         lastChunkCount = currentChunks;
@@ -554,134 +392,27 @@ void GameObject::updateWindowTitle() {
 }
 
 void GameObject::updateFPSSettings() const {
-    static int lastFpsCap = -1;
-
-    if (fpsCap != lastFpsCap) [[unlikely]] {
-        if (fpsCap == GameConstants::FPS_VSYNC_THRESHOLD) {
-            graphics::setVSYNC(true);
-            graphics::setTargetFPS(-1);
-        } else if (fpsCap <= GameConstants::FPS_MAX_CAPPED) {
-            graphics::setVSYNC(false);
-            graphics::setTargetFPS(fpsCap);
-        } else {
-            graphics::setVSYNC(false);
-            graphics::setTargetFPS(-1);
-        }
-        lastFpsCap = fpsCap;
-    }
-}
-
-void GameObject::updateShaders() {
-    if (cachedMatrices.dirty) [[unlikely]] {
-        cachedMatrices.view = camera.getViewMatrix();
-        cachedMatrices.projection = glm::perspective(
-            glm::radians(90.0f),
-            windowX / windowY,
-            10000.0f,
-            0.1f
-        );
-        cachedMatrices.dirty = false;
-    }
-
-    const glm::mat4 &view = cachedMatrices.view;
-    const glm::mat4 &projection = cachedMatrices.projection;
-    const glm::mat4 currentViewProjection = projection * view;
-    const glm::mat4 &frustumVP = freecamActive ? savedViewProjection : currentViewProjection;
-
-    Planet::planet->updateFrustum(frustumVP, currentViewProjection);
-
-    // Batch sky calculations
-    const glm::vec3 sunDir = sky.getSunDirection();
-    const glm::vec3 sunCol = sky.getSunColor();
-    const float ambient = sky.getAmbientStrength();
-
-    // SGG's Shader asserts no GL error is pending, so stale errors from earlier passes must be drained.
-    while (glGetError() != GL_NO_ERROR);
-
-    // Batch shader uniform updates
-    worldShader->use(true);
-    (*worldShader)["simpleLighting"] = simpleLightingEnabled ? 1 : 0;
-    (*worldShader)["view"] = view;
-    (*worldShader)["projection"] = projection;
-    (*worldShader)["sunDirection"] = sunDir;
-    (*worldShader)["sunColor"] = sunCol;
-    (*worldShader)["ambientStrength"] = ambient;
-    (*worldShader)["lightSpaceMatrix"] = Planet::planet->lightSpaceMatrix;
-
-    billboardShader->use(true);
-    (*billboardShader)["simpleLighting"] = simpleLightingEnabled ? 1 : 0;
-    (*billboardShader)["view"] = view;
-    (*billboardShader)["projection"] = projection;
-    (*billboardShader)["sunDirection"] = sunDir;
-    (*billboardShader)["sunColor"] = sunCol;
-    (*billboardShader)["ambientStrength"] = ambient;
-    (*billboardShader)["lightSpaceMatrix"] = Planet::planet->lightSpaceMatrix;
-
-    fluidShader->use(true);
-    (*fluidShader)["simpleLighting"] = simpleLightingEnabled ? 1 : 0;
-    (*fluidShader)["view"] = view;
-    (*fluidShader)["projection"] = projection;
-    (*fluidShader)["time"] = SDL_GetTicks() * 0.001f;
-    (*fluidShader)["sunDirection"] = sunDir;
-    (*fluidShader)["sunColor"] = sunCol;
-    (*fluidShader)["ambientStrength"] = ambient;
-    (*fluidShader)["lightSpaceMatrix"] = Planet::planet->lightSpaceMatrix;
-    (*fluidShader)["reflectionMatrix"] = Planet::planet->reflectionViewProjection;
-    (*fluidShader)["cameraPos"] = camera.Position;
-
-    outlineShader->use(true);
-    (*outlineShader)["SMART_view"] = view;
-    (*outlineShader)["SMART_projection"] = projection;
-}
-
-void GameObject::setupRenderingState() const {
-    const glm::vec3 skyCol = sky.getSkyColor();
-    glClearColor(skyCol.r, skyCol.g, skyCol.b, 1.0f);
-    glEnable(GL_DEPTH_TEST);
-    glDepthMask(GL_TRUE);
-    glClearDepth(0.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glDepthFunc(GL_GEQUAL);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-    glEnable(GL_CULL_FACE);
-    glCullFace(GL_BACK);
-    glFrontFace(GL_CW);
-    glDisable(GL_SCISSOR_TEST);
-    glDisable(GL_BLEND);
+    // The slider's lowest position means VSync; anything above FPS_MAX_CAPPED means uncapped.
+    Renderer::get().setVsync(fpsCap == GameConstants::FPS_VSYNC_THRESHOLD);
 }
 
 // ============================================================================
 // RENDERING
 // ============================================================================
-void GameObject::renderBlockOutline(const unsigned int vao) {
-    outlineShader->use(true);
-    const auto result = Physics::raycast(camera.Position, camera.Front,
-                                         GameConstants::RAYCAST_DISTANCE);
-    if (result.hit) [[likely]] {
-        (*outlineShader)["model"] = glm::vec4(result.blockX, result.blockY, result.blockZ, 1);
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-        glLogicOp(GL_INVERT);
-        glDisable(GL_CULL_FACE);
-        glBindVertexArray(vao);
-        glLineWidth(2.0);
-        glDrawArrays(GL_LINES, 0, 24);
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        glEnable(GL_CULL_FACE);
-    }
+void GameObject::renderBlockOutline() {
+    const auto result = Physics::raycast(camera.Position, camera.Front, GameConstants::RAYCAST_DISTANCE);
+    if (!result.hit) [[unlikely]] return;
+
+    Renderer &renderer = Renderer::get();
+    renderer.bindPipeline(PipelineId::Outline);
+    const glm::vec4 blockPos(result.blockX, result.blockY, result.blockZ, 1.0f);
+    renderer.pushConstants(&blockPos, sizeof(blockPos));
+    renderer.setLineWidth(2.0f);
+    renderer.draw(outlineVertices, 24);
+    renderer.setLineWidth(1.0f);
 }
 
 void GameObject::renderUI() const {
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
-
-    // Restore standard GL state for 2D rendering
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    setCanvasScaleMode(graphics::CANVAS_SCALE_FIT);
-    graphics::setCanvasSize(windowX, windowY);
-
     renderFluidOverlay();
 
     if (gameState.state == PLAYING) [[likely]] {
@@ -704,7 +435,7 @@ void GameObject::renderFluidOverlay() const {
     const char *blockName = BlockRegistry::getInstance().getBlock(blockType).blockName;
     const uint32_t blockHash = hashCString(blockName);
 
-    graphics::Brush overlay;
+    ui::Brush overlay;
     overlay.outline_opacity = 0.0f;
 
     if (blockHash == HASH_WATER) [[unlikely]] {
@@ -712,19 +443,19 @@ void GameObject::renderFluidOverlay() const {
         overlay.fill_color[1] = 0.0f;
         overlay.fill_color[2] = 0.45f;
         overlay.fill_opacity = 0.6f;
-        drawRect(cachedWindowCenter.x, cachedWindowCenter.y, windowX, windowY, overlay);
+        ui::drawRect(cachedWindowCenter.x, cachedWindowCenter.y, windowX, windowY, overlay);
     } else if (blockHash == HASH_LAVA) [[unlikely]] {
         overlay.fill_color[0] = 1.0f;
         overlay.fill_color[1] = 0.5f;
         overlay.fill_color[2] = 0.0f;
         overlay.fill_opacity = 0.4f;
-        drawRect(cachedWindowCenter.x, cachedWindowCenter.y, windowX, windowY, overlay);
+        ui::drawRect(cachedWindowCenter.x, cachedWindowCenter.y, windowX, windowY, overlay);
     }
 }
 
 void GameObject::renderCrosshair() const {
-    static const graphics::Brush crosshair = []() {
-        graphics::Brush b;
+    static const ui::Brush crosshair = []() {
+        ui::Brush b;
         b.fill_color[0] = 0.7f;
         b.fill_color[1] = 0.7f;
         b.fill_color[2] = 0.7f;
@@ -733,15 +464,15 @@ void GameObject::renderCrosshair() const {
         return b;
     }();
 
-    drawRect(cachedWindowCenter.x, cachedWindowCenter.y, GameConstants::CROSSHAIR_SIZE,
+    ui::drawRect(cachedWindowCenter.x, cachedWindowCenter.y, GameConstants::CROSSHAIR_SIZE,
              GameConstants::CROSSHAIR_THICKNESS, crosshair);
-    drawRect(cachedWindowCenter.x, cachedWindowCenter.y, GameConstants::CROSSHAIR_THICKNESS,
+    ui::drawRect(cachedWindowCenter.x, cachedWindowCenter.y, GameConstants::CROSSHAIR_THICKNESS,
              GameConstants::CROSSHAIR_SIZE, crosshair);
 }
 
 void GameObject::renderDebugInfo() const {
-    static const graphics::Brush textBrush = []() {
-        graphics::Brush b;
+    static const ui::Brush textBrush = []() {
+        ui::Brush b;
         b.fill_color[0] = 0.0f;
         b.fill_color[1] = 0.0f;
         b.fill_color[2] = 0.0f;
@@ -757,10 +488,10 @@ void GameObject::renderDebugInfo() const {
 
     static char fpsBuffer[32];
     snprintf(fpsBuffer, sizeof(fpsBuffer), "FPS: %d",
-             static_cast<int>(graphics::getFPS()));
+             static_cast<int>(platform::fps()));
 
-    drawText(10, 30, 15, fpsBuffer, textBrush);
-    drawText(10, 50, 15, coordsBuffer, textBrush);
+    ui::drawText(10, 30, 15, fpsBuffer, textBrush);
+    ui::drawText(10, 50, 15, coordsBuffer, textBrush);
 
     // Cache block registry reference
     static const BlockRegistry &registry = BlockRegistry::getInstance();
@@ -768,19 +499,19 @@ void GameObject::renderDebugInfo() const {
 
     static char blockBuffer[128];
     snprintf(blockBuffer, sizeof(blockBuffer), "SELECTED BLOCK: %s", blockName);
-    drawText(10, 70, 15, blockBuffer, textBrush);
+    ui::drawText(10, 70, 15, blockBuffer, textBrush);
 
     // Mode indicator
     {
-        static const graphics::Brush modeBrush = []() {
-            graphics::Brush b;
+        static const ui::Brush modeBrush = []() {
+            ui::Brush b;
             b.fill_color[0] = 0.2f;
             b.fill_color[1] = 0.8f;
             b.fill_color[2] = 0.2f;
             return b;
         }();
-        static const graphics::Brush noclipBrush = []() {
-            graphics::Brush b;
+        static const ui::Brush noclipBrush = []() {
+            ui::Brush b;
             b.fill_color[0] = 0.8f;
             b.fill_color[1] = 0.4f;
             b.fill_color[2] = 0.1f;
@@ -788,21 +519,21 @@ void GameObject::renderDebugInfo() const {
         }();
 
         if (noclipEnabled) {
-            drawText(10, 90, 15, "CREATIVE (F3 to toggle)", noclipBrush);
+            ui::drawText(10, 90, 15, "CREATIVE (F3 to toggle)", noclipBrush);
         } else {
-            drawText(10, 90, 15, "SURVIVAL (F3 to toggle)", modeBrush);
+            ui::drawText(10, 90, 15, "SURVIVAL (F3 to toggle)", modeBrush);
         }
     }
 
     if (freecamActive) [[unlikely]] {
-        static const graphics::Brush freecamBrush = []() {
-            graphics::Brush b;
+        static const ui::Brush freecamBrush = []() {
+            ui::Brush b;
             b.fill_color[0] = 1.0f;
             b.fill_color[1] = 0.5f;
             b.fill_color[2] = 0.0f;
             return b;
         }();
-        drawText(10, 110, 15, "FREECAM ON (F1 to exit)", freecamBrush);
+        ui::drawText(10, 110, 15, "FREECAM ON (F1 to exit)", freecamBrush);
     }
 }
 
@@ -811,8 +542,8 @@ void GameObject::renderDebugInfo() const {
 // ============================================================================
 
 void GameObject::renderPauseMenu() const {
-    static const graphics::Brush overlay = []() {
-        graphics::Brush b;
+    static const ui::Brush overlay = []() {
+        ui::Brush b;
         b.outline_opacity = 0.0f;
         b.fill_color[0] = 0.1f;
         b.fill_color[1] = 0.1f;
@@ -822,7 +553,7 @@ void GameObject::renderPauseMenu() const {
     }();
 
     // Draw generic overlay
-    drawRect(cachedWindowCenter.x, cachedWindowCenter.y, windowX, windowY, overlay);
+    ui::drawRect(cachedWindowCenter.x, cachedWindowCenter.y, windowX, windowY, overlay);
 
     switch (gameState.menuState) {
         case MenuState::MAIN:
@@ -838,15 +569,15 @@ void GameObject::renderPauseMenu() const {
 }
 
 void GameObject::renderMainMenu() const {
-    static const graphics::Brush titleBrush = []() {
-        graphics::Brush b;
+    static const ui::Brush titleBrush = []() {
+        ui::Brush b;
         b.fill_color[0] = 1.0f;
         b.fill_color[1] = 1.0f;
         b.fill_color[2] = 1.0f;
         return b;
     }();
 
-    drawText(cachedWindowCenter.x - 60, cachedWindowCenter.y - 120, 25, "Game Menu", titleBrush);
+    ui::drawText(cachedWindowCenter.x - 60, cachedWindowCenter.y - 120, 25, "Game Menu", titleBrush);
 
     videoSettingsBtn.draw();
     gameSettingsBtn.draw();
@@ -854,70 +585,70 @@ void GameObject::renderMainMenu() const {
 }
 
 void GameObject::renderVideoSettings() const {
-    static const graphics::Brush textBrush = []() {
-        graphics::Brush b;
+    static const ui::Brush textBrush = []() {
+        ui::Brush b;
         b.fill_color[0] = 1.0f;
         b.fill_color[1] = 1.0f;
         b.fill_color[2] = 1.0f;
         return b;
     }();
 
-    drawText(cachedWindowCenter.x - 80, cachedWindowCenter.y - 140, 25, "Video Settings", textBrush);
+    ui::drawText(cachedWindowCenter.x - 80, cachedWindowCenter.y - 140, 25, "Video Settings", textBrush);
 
     // Render Distance
     static char renderDistBuffer[64];
     snprintf(renderDistBuffer, sizeof(renderDistBuffer), "Render Distance: %d", Planet::planet->renderDistance);
-    drawText(cachedWindowCenter.x - 90, cachedWindowCenter.y - 105, 18, renderDistBuffer, textBrush);
+    ui::drawText(cachedWindowCenter.x - 90, cachedWindowCenter.y - 105, 18, renderDistBuffer, textBrush);
     renderDistanceSlider.draw();
 
     // Dynamic Shadows & Lighting
-    drawText(cachedWindowCenter.x - 130, cachedWindowCenter.y - 25, 18, "Dynamic Lighting", textBrush);
+    ui::drawText(cachedWindowCenter.x - 130, cachedWindowCenter.y - 25, 18, "Dynamic Lighting", textBrush);
     dynamicShadowsBox.draw();
 
     // AA
-    drawText(cachedWindowCenter.x - 130, cachedWindowCenter.y + 35, 18, "Anti-Aliasing", textBrush);
+    ui::drawText(cachedWindowCenter.x - 130, cachedWindowCenter.y + 35, 18, "Anti-Aliasing", textBrush);
     msaaBox.draw();
 
     backBtn.draw();
 }
 
 void GameObject::renderGameSettings() const {
-    static const graphics::Brush textBrush = []() {
-        graphics::Brush b;
+    static const ui::Brush textBrush = []() {
+        ui::Brush b;
         b.fill_color[0] = 1.0f;
         b.fill_color[1] = 1.0f;
         b.fill_color[2] = 1.0f;
         return b;
     }();
 
-    drawText(cachedWindowCenter.x - 80, cachedWindowCenter.y - 140, 25, "Game Settings", textBrush);
+    ui::drawText(cachedWindowCenter.x - 80, cachedWindowCenter.y - 140, 25, "Game Settings", textBrush);
 
     // Fullscreen
-    drawText(cachedWindowCenter.x - 80, cachedWindowCenter.y - 90, 18, "Fullscreen", textBrush);
+    ui::drawText(cachedWindowCenter.x - 80, cachedWindowCenter.y - 90, 18, "Fullscreen", textBrush);
     fullscreenCheckBox.draw();
 
     // FPS
     static char fpsBuffer[32];
     if (fpsCap == GameConstants::FPS_VSYNC_THRESHOLD) {
-        strcpy_s(fpsBuffer, "Max FPS: VSYNC");
+        snprintf(fpsBuffer, sizeof(fpsBuffer), "Max FPS: VSYNC");
     } else if (fpsCap <= GameConstants::FPS_MAX_CAPPED) {
         snprintf(fpsBuffer, sizeof(fpsBuffer), "Max FPS: %d", fpsCap);
     } else {
-        strcpy_s(fpsBuffer, "Max FPS: UNCAPPED");
+        snprintf(fpsBuffer, sizeof(fpsBuffer), "Max FPS: UNCAPPED");
     }
-    drawText(cachedWindowCenter.x - 90, cachedWindowCenter.y - 25, 18, fpsBuffer, textBrush);
+    ui::drawText(cachedWindowCenter.x - 90, cachedWindowCenter.y - 25, 18, fpsBuffer, textBrush);
     fpsSlider.draw();
 
     // Seed
-    drawText(cachedWindowCenter.x - 90, cachedWindowCenter.y + 40, 18, "World Seed", textBrush);
+    ui::drawText(cachedWindowCenter.x - 90, cachedWindowCenter.y + 40, 18, "World Seed", textBrush);
     seedBox.draw();
 
     // Cap Velocity
-    drawText(cachedWindowCenter.x - 90, cachedWindowCenter.y + 110, 18, "Uncap Speed", textBrush);
+    ui::drawText(cachedWindowCenter.x - 90, cachedWindowCenter.y + 110, 18, "Uncap Speed", textBrush);
     uncapSpeedBox.draw();
 
     // Super Jump
-    drawText(cachedWindowCenter.x - 90, cachedWindowCenter.y + 150, 18, "Super Jump", textBrush);
+    ui::drawText(cachedWindowCenter.x - 90, cachedWindowCenter.y + 150, 18, "Super Jump", textBrush);
     superJumpBox.draw();
 
     backBtn.draw();
@@ -927,8 +658,7 @@ void GameObject::renderGameSettings() const {
 // INPUT HANDLING
 // ============================================================================
 void GameObject::mouseCallBack() {
-    graphics::MouseState ms{};
-    getMouseState(ms);
+    const platform::MouseState &ms = platform::mouse();
 
     if (gameState.state == PLAYING) [[likely]] {
         handlePlayingMouseInput(ms);
@@ -938,19 +668,19 @@ void GameObject::mouseCallBack() {
     }
 }
 
-void GameObject::handlePlayingMouseInput(const graphics::MouseState &ms) {
-    const auto xOffset = static_cast<float>(ms.rel_x);
-    const auto yOffset = static_cast<float>(-ms.rel_y);
+void GameObject::handlePlayingMouseInput(const platform::MouseState &ms) {
+    const auto xOffset = static_cast<float>(ms.relX);
+    const auto yOffset = static_cast<float>(-ms.relY);
     camera.processMouseMovement(xOffset, yOffset, true);
 
-    if (ms.button_left_pressed || ms.button_middle_pressed || ms.button_right_pressed) [[unlikely]] {
+    if (ms.leftPressed || ms.middlePressed || ms.rightPressed) [[unlikely]] {
         const auto result = Physics::raycast(camera.Position, camera.Front,
                                              GameConstants::RAYCAST_DISTANCE);
         if (!result.hit) [[unlikely]] return;
 
-        if (ms.button_left_pressed) {
+        if (ms.leftPressed) {
             handleBlockBreak(result);
-        } else if (ms.button_middle_pressed) {
+        } else if (ms.middlePressed) {
             handleBlockPick(result);
         } else {
             handleBlockPlace(result);
@@ -958,24 +688,24 @@ void GameObject::handlePlayingMouseInput(const graphics::MouseState &ms) {
     }
 }
 
-void GameObject::handlePausedMouseInput(const graphics::MouseState &ms) {
-    if (ms.button_left_pressed) {
+void GameObject::handlePausedMouseInput(const platform::MouseState &ms) {
+    if (ms.leftPressed) {
         if (gameState.menuState == MenuState::MAIN) {
-            videoSettingsBtn.handleClick(ms.cur_pos_x, ms.cur_pos_y, [this]() {
+            videoSettingsBtn.handleClick(ms.x, ms.y, [this]() {
                 gameState.menuState = MenuState::VIDEO;
             });
-            gameSettingsBtn.handleClick(ms.cur_pos_x, ms.cur_pos_y, [this]() {
+            gameSettingsBtn.handleClick(ms.x, ms.y, [this]() {
                 gameState.menuState = MenuState::GAME;
             });
-            quitBtn.handleClick(ms.cur_pos_x, ms.cur_pos_y, [this]() {
-                graphics::stopMessageLoop();
+            quitBtn.handleClick(ms.x, ms.y, [this]() {
+                platform::quit();
             });
         } else if (gameState.menuState == MenuState::VIDEO) {
-            backBtn.handleClick(ms.cur_pos_x, ms.cur_pos_y, [this]() {
+            backBtn.handleClick(ms.x, ms.y, [this]() {
                 gameState.menuState = MenuState::MAIN;
             });
 
-            dynamicShadowsBox.handleClick(ms.cur_pos_x, ms.cur_pos_y,
+            dynamicShadowsBox.handleClick(ms.x, ms.y,
                                           [this]() {
                                               dynamicShadowsEnabled = true;
                                               simpleLightingEnabled = false;
@@ -985,34 +715,34 @@ void GameObject::handlePausedMouseInput(const graphics::MouseState &ms) {
                                               simpleLightingEnabled = true;
                                           });
 
-            msaaBox.handleClick(ms.cur_pos_x, ms.cur_pos_y,
+            msaaBox.handleClick(ms.x, ms.y,
                                 [this]() { msaaEnabled = true; },
                                 [this]() { msaaEnabled = false; });
         } else if (gameState.menuState == MenuState::GAME) {
-            backBtn.handleClick(ms.cur_pos_x, ms.cur_pos_y, [this]() {
+            backBtn.handleClick(ms.x, ms.y, [this]() {
                 gameState.menuState = MenuState::MAIN;
             });
 
-            fullscreenCheckBox.handleClick(ms.cur_pos_x, ms.cur_pos_y,
-                                           [] { graphics::setFullScreen(true); },
-                                           [] { graphics::setFullScreen(false); });
+            fullscreenCheckBox.handleClick(ms.x, ms.y,
+                                           [] { platform::setFullscreen(true); },
+                                           [] { platform::setFullscreen(false); });
 
-            uncapSpeedBox.handleClick(ms.cur_pos_x, ms.cur_pos_y,
+            uncapSpeedBox.handleClick(ms.x, ms.y,
                                        [this] { uncapSpeedEnabled = true; },
                                        [this] { uncapSpeedEnabled = false; });
 
-            superJumpBox.handleClick(ms.cur_pos_x, ms.cur_pos_y,
+            superJumpBox.handleClick(ms.x, ms.y,
                                      [this] { superJumpEnabled = true; },
                                      [this] { superJumpEnabled = false; });
         }
     }
 
     // Sliders handling (Drag)
-    if (ms.button_left_down) {
+    if (ms.leftDown) {
         if (gameState.menuState == MenuState::VIDEO) {
-            renderDistanceSlider.startDragging(ms.cur_pos_x, ms.cur_pos_y);
+            renderDistanceSlider.startDragging(ms.x, ms.y);
         } else if (gameState.menuState == MenuState::GAME) {
-            fpsSlider.startDragging(ms.cur_pos_x, ms.cur_pos_y);
+            fpsSlider.startDragging(ms.x, ms.y);
         }
     } else {
         renderDistanceSlider.stopDragging();
@@ -1020,16 +750,16 @@ void GameObject::handlePausedMouseInput(const graphics::MouseState &ms) {
     }
 
     if (gameState.menuState == MenuState::VIDEO) {
-        renderDistanceSlider.update(ms.cur_pos_x, Planet::planet->renderDistance);
+        renderDistanceSlider.update(ms.x, Planet::planet->renderDistance);
     } else if (gameState.menuState == MenuState::GAME) {
-        fpsSlider.update(ms.cur_pos_x, fpsCap);
+        fpsSlider.update(ms.x, fpsCap);
     }
 }
 
 void GameObject::keyboardCallBack(const float deltaTime) {
     // Toggle pause / Menu Navigation
     static bool escPressed = false;
-    if (getKeyState(graphics::SCANCODE_ESCAPE)) {
+    if (platform::keyDown(SDL_SCANCODE_ESCAPE)) {
         if (!escPressed) {
             escPressed = true;
             if (gameState.state == PLAYING) {
@@ -1065,27 +795,27 @@ void GameObject::keyboardCallBack(const float deltaTime) {
 
     if (noclipEnabled) {
         // Noclip mode: fly freely through everything (original behavior)
-        if (getKeyState(graphics::SCANCODE_W)) {
+        if (platform::keyDown(SDL_SCANCODE_W)) {
             camera.processKeyboard(FORWARD, movementSpeed);
             moved = true;
         }
-        if (getKeyState(graphics::SCANCODE_S)) {
+        if (platform::keyDown(SDL_SCANCODE_S)) {
             camera.processKeyboard(BACKWARD, movementSpeed);
             moved = true;
         }
-        if (getKeyState(graphics::SCANCODE_A)) {
+        if (platform::keyDown(SDL_SCANCODE_A)) {
             camera.processKeyboard(LEFT, movementSpeed);
             moved = true;
         }
-        if (getKeyState(graphics::SCANCODE_D)) {
+        if (platform::keyDown(SDL_SCANCODE_D)) {
             camera.processKeyboard(RIGHT, movementSpeed);
             moved = true;
         }
-        if (getKeyState(graphics::SCANCODE_SPACE)) {
+        if (platform::keyDown(SDL_SCANCODE_SPACE)) {
             camera.processKeyboard(UP, movementSpeed);
             moved = true;
         }
-        if (getKeyState(graphics::SCANCODE_LSHIFT)) {
+        if (platform::keyDown(SDL_SCANCODE_LSHIFT)) {
             camera.processKeyboard(DOWN, movementSpeed);
             moved = true;
         }
@@ -1097,10 +827,10 @@ void GameObject::keyboardCallBack(const float deltaTime) {
         glm::vec3 flatFront = glm::normalize(glm::vec3(camera.Front.x, 0.0f, camera.Front.z));
         glm::vec3 flatRight = camera.Right; // Right is always horizontal if Up is (0,1,0)
 
-        if (getKeyState(graphics::SCANCODE_W)) moveDir += flatFront;
-        if (getKeyState(graphics::SCANCODE_S)) moveDir -= flatFront;
-        if (getKeyState(graphics::SCANCODE_A)) moveDir -= flatRight;
-        if (getKeyState(graphics::SCANCODE_D)) moveDir += flatRight;
+        if (platform::keyDown(SDL_SCANCODE_W)) moveDir += flatFront;
+        if (platform::keyDown(SDL_SCANCODE_S)) moveDir -= flatFront;
+        if (platform::keyDown(SDL_SCANCODE_A)) moveDir -= flatRight;
+        if (platform::keyDown(SDL_SCANCODE_D)) moveDir += flatRight;
 
         // Apply movement input to velocity
         // Convert per-ms speed multiplier to per-second velocity: (units/ms) * 1000 = units/s
@@ -1159,7 +889,7 @@ void GameObject::keyboardCallBack(const float deltaTime) {
 
 
         // Jump (only when on ground)
-        if (getKeyState(graphics::SCANCODE_SPACE) && playerOnGround) {
+        if (platform::keyDown(SDL_SCANCODE_SPACE) && playerOnGround) {
             playerVelocity.y = superJumpEnabled ? 100.0f : 8.5f; // Jump impulse
             playerOnGround = false;
         }
@@ -1177,7 +907,7 @@ void GameObject::keyboardCallBack(const float deltaTime) {
     static bool f1Pressed = false;
     static bool wasNoclipEnabled = true;
 
-    if (getKeyState(graphics::SCANCODE_F1)) {
+    if (platform::keyDown(SDL_SCANCODE_F1)) {
         if (!f1Pressed) [[unlikely]] {
             f1Pressed = true;
             freecamActive = !freecamActive;
@@ -1205,7 +935,7 @@ void GameObject::keyboardCallBack(const float deltaTime) {
     }
 
     static bool f2Pressed = false;
-    if (getKeyState(graphics::SCANCODE_F2)) {
+    if (platform::keyDown(SDL_SCANCODE_F2)) {
         if (!f2Pressed) [[unlikely]] {
             f2Pressed = true;
             sky.togglePause();
@@ -1217,7 +947,7 @@ void GameObject::keyboardCallBack(const float deltaTime) {
 
     // F3: Toggle noclip / collision mode
     static bool f3Pressed = false;
-    if (getKeyState(graphics::SCANCODE_F3)) {
+    if (platform::keyDown(SDL_SCANCODE_F3)) {
         if (!f3Pressed) [[unlikely]] {
             f3Pressed = true;
             noclipEnabled = !noclipEnabled;
@@ -1234,12 +964,12 @@ void GameObject::keyboardCallBack(const float deltaTime) {
     }
 
     static bool f11Pressed = false;
-    if (getKeyState(graphics::SCANCODE_F11)) {
+    if (platform::keyDown(SDL_SCANCODE_F11)) {
         if (!f11Pressed) [[unlikely]] {
             f11Pressed = true;
             const bool isChecked = fullscreenCheckBox.isChecked();
             fullscreenCheckBox.setChecked(!isChecked);
-            graphics::setFullScreen(!isChecked);
+            platform::setFullscreen(!isChecked);
         }
     } else {
         f11Pressed = false;
@@ -1354,14 +1084,14 @@ void GameObject::playSound(const uint16_t block_id) {
 
     // Fast path for grass blocks (5-12)
     if (block_id >= 5 && block_id <= 12) [[likely]] {
-        graphics::playSound("../assets/sounds/GRASS.ogg", 0.4f);
+        platform::playSound("../assets/sounds/GRASS.ogg", 0.4f);
         return;
     }
 
     // Linear search is fast for small tables
     for (const auto &[id, sound, volume]: soundMap) {
         if (id == block_id) {
-            graphics::playSound(sound, volume);
+            platform::playSound(sound, volume);
             return;
         }
     }
@@ -1460,55 +1190,20 @@ void GameObject::initializePlayerModel() {
     // Right Leg
     addBox(0.13f, 0.375f, 0.0f, 0.24f, 0.75f, 0.25f, 0.2f, 0.2f, 0.8f);
 
-    playerModelIndexCount = indices.size();
-
-    glGenVertexArrays(1, &playerModelVAO);
-    glGenBuffers(1, &playerModelVBO);
-    glGenBuffers(1, &playerModelEBO);
-
-    glBindVertexArray(playerModelVAO);
-
-    glBindBuffer(GL_ARRAY_BUFFER, playerModelVBO);
-    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_STATIC_DRAW);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, playerModelEBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
-
-    // Pos
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *) 0);
-    glEnableVertexAttribArray(0);
-
-    glBindVertexArray(0);
+    Renderer::get().uploadMesh(playerModel, vertices.data(), vertices.size() * sizeof(Vertex), indices.data(),
+                               static_cast<uint32_t>(indices.size()));
 }
 
 void GameObject::renderPlayerModel() {
-    if (playerModelVAO == 0) return;
+    // The model is built from the feet up; savedPlayerPosition is at eye level.
+    const glm::vec3 feetPos = savedPlayerPosition - glm::vec3(0.0f, 1.6f, 0.0f);
+    const struct {
+        glm::mat4 model;
+        glm::vec4 color;
+    } push{glm::translate(glm::mat4(1.0f), feetPos), glm::vec4(0.9f, 0.2f, 0.2f, 1.0f)}; // Bright red for visibility
 
-    bboxShader->use();
-
-    // Calculate model matrix based on saved player position (where the body is)
-    glm::mat4 model = glm::mat4(1.0f);
-    // savedPlayerPosition is the camera eye level. Feet are at y - 1.62 roughly.
-    // But my model is built from 0 upwards.
-    // Camera is usually at 1.6m height.
-    glm::vec3 feetPos = savedPlayerPosition - glm::vec3(0.0f, 1.6f, 0.0f);
-
-    model = glm::translate(model, feetPos);
-
-    (*bboxShader)["viewProjection"] = cachedMatrices.projection * cachedMatrices.view;
-    (*bboxShader)["model"] = model;
-    (*bboxShader)["color"] = glm::vec4(0.9f, 0.2f, 0.2f, 1.0f); // Bright Red for visibility
-
-    // Disable culling and depth test to ensure full visibility (debug style)
-    glDisable(GL_CULL_FACE);
-    glDisable(GL_DEPTH_TEST);
-
-    glBindVertexArray(playerModelVAO);
-    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-    glDrawElements(GL_TRIANGLES, playerModelIndexCount, GL_UNSIGNED_INT, 0);
-    glBindVertexArray(0);
-
-    // Restore state
-    glEnable(GL_CULL_FACE);
-    glEnable(GL_DEPTH_TEST);
+    Renderer &renderer = Renderer::get();
+    renderer.bindPipeline(PipelineId::Model);
+    renderer.pushConstants(&push, sizeof(push));
+    renderer.draw(playerModel);
 }

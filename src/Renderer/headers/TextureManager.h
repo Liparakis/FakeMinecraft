@@ -3,10 +3,10 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
-#include <GL/glew.h>
+#include <cstdint>
 
 /**
- * @brief Manages the game's textures using OpenGL Texture Arrays.
+ * @brief Manages the game's textures as one texture array.
  * 
  * TextureManager loads image files from the disk, processes them (like adding
  * tints or resizing them), and sends them to the GPU. 
@@ -34,11 +34,6 @@ public:
      */
     void loadTextures(const std::string& directoryPath);
 
-    /**
-     * @brief Returns the OpenGL Texture ID for the generated Texture Array.
-     * @return GLuint representing the OpenGL texture object.
-     */
-    GLuint getTextureArrayID() const { return textureArrayID; }
 
     /**
      * @brief Returns the layer index for a given texture name.
@@ -53,11 +48,8 @@ private:
     TextureManager() = default;
     ~TextureManager();
 
-    /// Map from texture name to its starting layer index in the OpenGL texture array.
+    /// Map from texture name to its starting layer index in the block texture array.
     std::unordered_map<std::string, uint16_t> textureMap;
-    
-    /// OpenGL handle for the Texture Array.
-    GLuint textureArrayID = 0;
     
     /**
      * @brief Internal struct to hold raw source image data before processing.

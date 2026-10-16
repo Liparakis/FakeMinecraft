@@ -4,7 +4,8 @@
  */
 #pragma once
 
-#include <graphics.h>
+#include "Canvas.h"
+#include <functional>
 
 /**
  * @class Checkbox

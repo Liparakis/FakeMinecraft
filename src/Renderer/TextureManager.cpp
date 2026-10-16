@@ -1,4 +1,6 @@
 #include "headers/TextureManager.h"
+#include "Renderer.h"
+#include <cstring>
 #include <iostream>
 #include <filesystem>
 #include <algorithm>
@@ -19,11 +21,7 @@ TextureManager& TextureManager::getInstance() {
     return instance;
 }
 
-TextureManager::~TextureManager() {
-    if (textureArrayID != 0) {
-        glDeleteTextures(1, &textureArrayID);
-    }
-}
+TextureManager::~TextureManager() = default;
 
 uint16_t TextureManager::getLayerIndex(const std::string& textureName) const {
     const auto it = textureMap.find(textureName);
@@ -385,26 +383,9 @@ void TextureManager::loadTextures(const std::string& directoryPath) {
         currentLayer += targetFrames;
     }
 
-    // 4. Upload to OpenGL GPU Memory
-    if (textureArrayID != 0) {
-        glDeleteTextures(1, &textureArrayID);
-    }
-
-    glGenTextures(1, &textureArrayID);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, textureArrayID);
-
-    // Nearest filtering is used for a blocky aesthetic, while mipmaps are used for distant clarity.
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
-
-    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA, arrayWidth, arrayHeight,
-                 static_cast<GLsizei>(layerCount), 0, GL_RGBA, GL_UNSIGNED_BYTE,
-                 textureArrayBuffer.data());
-
-    glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    // 4. Upload to the GPU (mipmaps are generated there).
+    Renderer::get().setTextureArray(static_cast<uint32_t>(arrayWidth), static_cast<uint32_t>(arrayHeight),
+                                    static_cast<uint32_t>(layerCount), textureArrayBuffer.data());
 
     std::cout << "Texture Array Generated. Total Size: " << arrayWidth << "x" << arrayHeight
               << " | Total Layers: " << layerCount << std::endl;

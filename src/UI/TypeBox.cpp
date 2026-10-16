@@ -3,7 +3,9 @@
  * @brief Implementation of a text input box.
  */
 #include "TypeBox.h"
+#include "../Platform/Platform.h"
 #include <algorithm>
+#include <unordered_map>
 #include <iostream>
 #include <ostream>
 
@@ -13,7 +15,7 @@ TypeBox::TypeBox(float x, float y, float width, float height)
 }
 
 void TypeBox::draw() const {
-    graphics::Brush br;
+    ui::Brush br;
     br.outline_opacity = 1.0f;
     br.fill_opacity = isActive ? 0.7f : 0.3f;
     br.fill_color[0] = 0.2f;
@@ -21,7 +23,7 @@ void TypeBox::draw() const {
     br.fill_color[2] = 0.2f;
 
     // Draw the TypeBox background
-    drawRect(x, y, width, height, br);
+    ui::drawRect(x, y, width, height, br);
 
     // Draw the text
     br.fill_opacity = 1.0f;
@@ -30,7 +32,7 @@ void TypeBox::draw() const {
     br.fill_color[2] = 1.0f;
 
     float textX = x - width / 2 + 5;
-    drawText(textX, y + 5, 16, text, br);
+    ui::drawText(textX, y + 5, 16, text, br);
 }
 
 /**
@@ -47,9 +49,9 @@ void TypeBox::handleInput() {
     const float initialDelay = 500.0f; // Wait half a second before repeating
     const float spamInterval = 2.0f;   // How fast to repeat after the delay
 
-    float currentTime = graphics::getGlobalTime();
+    float currentTime = platform::timeMs();
 
-    if (getKeyState(graphics::SCANCODE_RETURN)) {
+    if (platform::keyDown(SDL_SCANCODE_RETURN)) {
         if (!enterPressed) {
             enterPressed = true;
             isActive = !isActive;
@@ -59,8 +61,8 @@ void TypeBox::handleInput() {
     }
 
     if (isActive) {
-        for (int scancode = 0; scancode < graphics::NUM_SCANCODES; ++scancode) {
-            bool isPressed = getKeyState(static_cast<graphics::scancode_t>(scancode));
+        for (int scancode = 0; scancode < SDL_NUM_SCANCODES; ++scancode) {
+            bool isPressed = platform::keyDown(static_cast<SDL_Scancode>(scancode));
 
             if (isPressed) {
                 if (!keyState[scancode]) {
@@ -87,7 +89,7 @@ void TypeBox::processKey(int scancode) {
     float textWidth = approximateTextWidth(text, 14); // Use the approximation
     float maxTextWidth = width - 10; // Leave some padding
 
-    if (scancode == graphics::SCANCODE_BACKSPACE && !text.empty()) {
+    if (scancode == SDL_SCANCODE_BACKSPACE && !text.empty()) {
         text.pop_back();
     }
 
@@ -96,13 +98,13 @@ void TypeBox::processKey(int scancode) {
     }
 
     // Handle key presses
-    if (scancode >= graphics::SCANCODE_A && scancode <= graphics::SCANCODE_Z) {
-        char c = 'a' + (scancode - graphics::SCANCODE_A);
+    if (scancode >= SDL_SCANCODE_A && scancode <= SDL_SCANCODE_Z) {
+        char c = 'a' + (scancode - SDL_SCANCODE_A);
         text += c;
-    } else if (scancode >= graphics::SCANCODE_1 && scancode <= graphics::SCANCODE_0) {
-        char c = '1' + (scancode - graphics::SCANCODE_1);
+    } else if (scancode >= SDL_SCANCODE_1 && scancode <= SDL_SCANCODE_0) {
+        char c = '1' + (scancode - SDL_SCANCODE_1);
         text += c;
-    } else if (scancode == graphics::SCANCODE_SPACE) {
+    } else if (scancode == SDL_SCANCODE_SPACE) {
         text += ' ';
     }
 }

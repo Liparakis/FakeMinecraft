@@ -2,23 +2,22 @@
  * @file Slider.cpp
  * @brief Implementation of a UI slider for adjusting values.
  */
-#include <GL/glew.h>
 #include "Slider.h"
 #include <algorithm>
-#include <Graphics.h>
+#include "Canvas.h"
 
 /**
  * @brief Renders the slider bar and handle.
  */
 void Slider::draw() const {
-    graphics::Brush brush;
+    ui::Brush brush;
     brush.outline_opacity = 0.0f;
 
     brush.fill_color[0] = 0.6f;
     brush.fill_color[1] = 0.6f;
     brush.fill_color[2] = 0.6f;
 
-    drawRect(x + width / 2, y, width, height, brush);
+    ui::drawRect(x + width / 2, y, width, height, brush);
 
     brush.outline_opacity = 1.0f;
     brush.outline_width = 3.0f;
@@ -26,7 +25,7 @@ void Slider::draw() const {
     brush.outline_color[1] = 0.2f;
     brush.outline_color[2] = 0.2f;
 
-    drawRect(x + width / 2, y, width, height, brush);
+    ui::drawRect(x + width / 2, y, width, height, brush);
     float handleX = x + (currentValue - minValue) / (maxValue - minValue) * width;
 
     brush.outline_opacity = 0.0f;
@@ -34,14 +33,14 @@ void Slider::draw() const {
     brush.fill_color[1] = 0.3f;
     brush.fill_color[2] = 0.1f;
 
-    drawRect(handleX, y, height * 1.0f, height * 1.0f, brush);
+    ui::drawRect(handleX, y, height * 1.0f, height * 1.0f, brush);
     brush.outline_opacity = 1.0f;
     brush.outline_width = 3.0f;
     brush.outline_color[0] = 0.1f;
     brush.outline_color[1] = 0.05f;
     brush.outline_color[2] = 0.0f;
 
-    drawRect(handleX, y, height * 1.0f, height * 1.0f, brush);
+    ui::drawRect(handleX, y, height * 1.0f, height * 1.0f, brush);
 }
 
 

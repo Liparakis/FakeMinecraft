@@ -103,7 +103,7 @@ void Camera::processKeyboard(Camera_Movement direction, float deltaTime) {
  * 
  * Pitch constraints are applied to prevent excessive upward or downward rotation.
  */
-void Camera::processMouseMovement(float xoffset, float yoffset, GLboolean constrainPitch) {
+void Camera::processMouseMovement(float xoffset, float yoffset, bool constrainPitch) {
     xoffset *= MouseSensitivity;
     yoffset *= MouseSensitivity;
 

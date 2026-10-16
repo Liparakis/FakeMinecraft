@@ -9,7 +9,7 @@
  * This mirrors the approach Minecraft 1.18+ uses:
  * https://minecraft.wiki/w/World_generation#Overworld
  *
- * Pure header: no OpenGL or registry dependencies, so tools can sample it directly.
+ * Pure header: no renderer or registry dependencies, so tools can sample it directly.
  */
 #pragma once
 

@@ -5,7 +5,7 @@ Button::Button(float x, float y, float width, float height, std::string label)
 }
 
 void Button::draw() const {
-    graphics::Brush brush;
+    ui::Brush brush;
     brush.fill_color[0] = 0.5f;
     brush.fill_color[1] = 0.5f;
     brush.fill_color[2] = 0.5f; // Grey background
@@ -14,10 +14,10 @@ void Button::draw() const {
     brush.outline_width = 2.0f;
     
     // Draw background
-    graphics::drawRect(x, y, width, height, brush);
+    ui::drawRect(x, y, width, height, brush);
     
     // Draw text (centered)
-    graphics::Brush textBrush;
+    ui::Brush textBrush;
     textBrush.fill_color[0] = 1.0f;
     textBrush.fill_color[1] = 1.0f;
     textBrush.fill_color[2] = 1.0f; // White text
@@ -26,7 +26,7 @@ void Button::draw() const {
     float textX = x - (label.length() * 4.0f); 
     float textY = y + 4.0f; // Offset for baseline
     
-    graphics::drawText(textX, textY, 15.0f, label.c_str(), textBrush);
+    ui::drawText(textX, textY, 15.0f, label.c_str(), textBrush);
 }
 
 bool Button::isHovered(float mouseX, float mouseY) const {

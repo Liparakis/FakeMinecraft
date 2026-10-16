@@ -23,15 +23,6 @@
 #include "ThreadPool.h"
 
 /**
- * @enum OcclusionMethod
- * @brief Different ways to decide if a chunk is hidden or not based on GPU queries.
- */
-enum class OcclusionMethod : uint8_t {
-    VOTING,  ///< Discrete voting: we wait for N failures before hiding it (prevents flickering).
-    EMA      ///< Exponential Moving Average: a smoother way to interpolate visibility.
-};
-
-/**
  * @class Planet
  * @brief The main class for our world system.
  * 
@@ -43,59 +34,52 @@ class Planet
 {
 public:
     /**
-     * @brief Constructor. Initializes shaders and reserves memory for chunk lists.
+     * @brief Constructor. Starts the chunk thread and reserves memory for chunk lists.
      */
-    Planet(Shader* solidShader, Shader* waterShader, Shader* billboardShader, Shader* bboxShader);
-    
+    Planet();
+
     /**
-     * @brief Destructor. Stops background threads and cleans up GPU resources.
+     * @brief Destructor. Stops background threads; chunk meshes are released to the renderer.
      */
     ~Planet();
 
     /**
-     * @brief The main update function called every frame.
-     * 
-     * Handles stuff like loading/unloading chunks, uploading new meshes to the GPU, 
-     * and sorting chunks by distance.
+     * @brief Per-frame world update, called after Renderer::beginFrame and before any pass.
+     *
+     * Loads/unloads chunks, uploads new meshes, and builds the culled, sorted draw lists.
      * @param cameraPos Where the player is in the world.
-     * @param updateOcclusion Turn this off if you don't want to run occlusion queries.
      */
-    void update(const glm::vec3& cameraPos, bool updateOcclusion = true);
-    
-    /**
-     * @brief Renders the scene from the light's perspective to the shadow map.
-     * @param shader The shadow depth shader.
-     */
-    void renderShadows(Shader* shader);
+    void prepare(const glm::vec3& cameraPos);
 
-    // Stuff for shadows
-    unsigned int depthMapFBO = 0;
-    unsigned int depthMap = 0;
-    const unsigned int SHADOW_WIDTH = 4096, SHADOW_HEIGHT = 4096;
+    /// Draws solid blocks, billboards and water from prepare()'s lists; must run inside the main pass.
+    void render();
+
+    /// Draws shadow casters near the player; must run inside the shadow pass.
+    void renderShadows(const glm::mat4& lightSpace);
+
     float shadowDistance = 256.0f; // Half-width of the shadow map in blocks; also limits which chunks cast shadows
-    glm::mat4 lightSpaceMatrix;
 
-    // Stuff for reflections
-    unsigned int reflectionFBO = 0;
-    unsigned int reflectionTexture = 0;
-    unsigned int reflectionDepthRBO = 0;
-    const unsigned int REFLECTION_WIDTH = 1024, REFLECTION_HEIGHT = 1024;
-    glm::mat4 reflectionViewProjection;  // For water shader
-    
-    /**
-     * @brief Renders the scene for water reflection.
-     * @param cameraPos Current camera position.
-     * @param cameraFront Current camera front vector.
-     * @param aspectRatio Aspect ratio of the window.
-     */
-    void renderReflection(const glm::vec3& cameraPos, const glm::vec3& cameraFront, float aspectRatio);
+    /// View and projection of the camera mirrored below the water plane.
+    struct ReflectionCamera {
+        glm::mat4 view;
+        glm::mat4 projection;
+    };
+    [[nodiscard]] static ReflectionCamera reflectionCamera(const glm::vec3& cameraPos, const glm::vec3& cameraFront, float aspectRatio);
+
+    /// Clip plane that keeps only geometry above the water surface in the reflection.
+    static inline const glm::vec4 REFLECTION_CLIP_PLANE{0.0f, 1.0f, 0.0f, -64.5f};
+
+    /// True when water was visible last frame, i.e. the reflection is worth rendering.
+    [[nodiscard]] bool hasVisibleWater() const { return !waterChunks.empty(); }
+
+    /// Draws nearby chunks from the reflection camera; must run inside the reflection pass.
+    void renderReflection(const glm::vec3& cameraPos, const glm::mat4& reflectionViewProjection);
 
     /**
-     * @brief Updates the frustum state for culling.
-     * @param frustumVP The view-projection matrix used for culling (can be frozen).
-     * @param renderingVP The current view-projection matrix used for rendering.
+     * @brief Updates the frustum used for culling.
+     * @param frustumVP The view-projection matrix used for culling (frozen while in freecam).
      */
-    void updateFrustum(const glm::mat4& frustumVP, const glm::mat4& renderingVP);
+    void updateFrustum(const glm::mat4& frustumVP);
 
     /**
      * @brief Get a chunk based on its coordinates.
@@ -174,17 +158,11 @@ private:
     std::atomic<int> camChunkX{-100}, camChunkY{-100}, camChunkZ{-100};
     std::atomic<long> last_seed{0};
 
-    Shader* solidShader;
-    Shader* waterShader;
-    Shader* billboardShader;
-    Shader* bboxShader;
-
     std::thread chunkThread;                   ///< The thread that handles the world in the background.
     mutable std::shared_mutex chunkMutex;      ///< A lock so multiple threads don't mess up our chunk maps.
     std::atomic<bool> shouldEnd{false};        ///< A flag to tell the threads to stop.
 
     Frustum frustum;                           ///< Used to see what's actually in front of the camera.
-    glm::mat4 lastViewProjection = glm::mat4(1.0f);
     ThreadPool chunkGenPool;                   ///< A pool of threads to generate world data in parallel.
     int visibleCount = 0;
     /** @} */
@@ -199,17 +177,12 @@ private:
     std::vector<Chunk*> waterChunks;
     std::vector<Chunk*> frustumVisibleChunks;
     std::vector<ChunkPos> toDeleteList;
+    std::vector<Chunk*> shadowCasters;         ///< Scratch list for the shadow pass.
+    std::vector<Chunk*> reflectedChunks;       ///< Scratch list for the reflection pass.
 
     std::vector<Chunk*> chunkPool;             ///< A place where we put old chunks so we can reuse them.
     std::vector<Chunk*> renderChunks;          ///< A list we use for rendering so it doesn't change while we're drawing.
     std::atomic<bool> renderChunksDirty{false};
-    /** @} */
-
-    OcclusionMethod occlusionMethod = OcclusionMethod::VOTING;
-
-    /** @name Hardware Occlusion Resources @{ */
-    unsigned int bboxVAO = 0, bboxVBO = 0, bboxEBO = 0;
-    void initBoundingBoxMesh();
     /** @} */
 
     /**
@@ -219,10 +192,4 @@ private:
         float maxDistSq{0.0f};
         int framesSinceMove{0};
     } cameraCache;
-    
-public:
-    /**
-     * @brief Renders a debug bounding box.
-     */
-    void drawBoundingBox(const glm::vec3& center, const glm::vec3& extents);
 };
