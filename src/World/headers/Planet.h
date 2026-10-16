@@ -81,7 +81,7 @@ public:
         glm::mat4 view;
         glm::mat4 projection;
     };
-    [[nodiscard]] static ReflectionCamera reflectionCamera(const glm::vec3& cameraPos, const glm::vec3& cameraFront, float aspectRatio);
+    [[nodiscard]] static ReflectionCamera reflectionCamera(const glm::vec3& cameraPos, const glm::vec3& cameraFront, const glm::mat4& projection);
 
     /// Clip plane that keeps only geometry above the water surface in the reflection.
     static inline const glm::vec4 REFLECTION_CLIP_PLANE{0.0f, 1.0f, 0.0f, -64.5f};

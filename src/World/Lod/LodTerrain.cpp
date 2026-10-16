@@ -11,7 +11,7 @@
 namespace {
     constexpr int SNOW_LINE = 172;       ///< Matches WorldGen: peaks above this are snow-capped.
     /// A tile splits while the camera is closer than this many tile sizes. A cell then spans about
-    /// 640 / (CELLS * SPLIT_FACTOR) pixels at 1280 px wide and 90 degrees FOV (~5 px), at any distance.
+    /// focal / (CELLS * SPLIT_FACTOR) pixels at any distance: ~4 px at 720p and a 70 degree FOV.
     constexpr float SPLIT_FACTOR = 4.0f;
     constexpr size_t MAX_PENDING = 24;   ///< Tiles being built at once.
     constexpr size_t MAX_UPLOADS_PER_FRAME = 8;

@@ -341,7 +341,7 @@ void GameObject::renderFrame() {
         cachedMatrices.view = camera.getViewMatrix();
         // Reverse-Z: near and far are swapped so depth precision is spent close to the camera.
         // The far distance (first argument) covers the distant terrain's ~16 km horizon.
-        cachedMatrices.projection = glm::perspective(glm::radians(90.0f), windowX / windowY,
+        cachedMatrices.projection = glm::perspective(glm::radians(GameConstants::FOV_DEGREES), windowX / windowY,
                                                      LodTerrain::VIEW_DISTANCE * 1.5f, 0.1f);
         cachedMatrices.dirty = false;
     }
@@ -349,7 +349,7 @@ void GameObject::renderFrame() {
     const glm::mat4 &projection = cachedMatrices.projection;
     Planet::planet->updateFrustum(freecamActive ? savedViewProjection : projection * view);
 
-    const Planet::ReflectionCamera reflection = Planet::reflectionCamera(camera.Position, camera.Front, windowX / windowY);
+    const Planet::ReflectionCamera reflection = Planet::reflectionCamera(camera.Position, camera.Front, projection);
     const glm::mat4 lightSpace = toVulkanClip(computeLightSpace());
 
     FrameUniforms mainUniforms;
@@ -918,10 +918,6 @@ void GameObject::keyboardCallBack(const float deltaTime) {
         if (platform::keyDown(SDL_SCANCODE_A)) moveDir -= flatRight;
         if (platform::keyDown(SDL_SCANCODE_D)) moveDir += flatRight;
 
-        // Apply movement input to velocity
-        // Convert per-ms speed multiplier to per-second velocity: (units/ms) * 1000 = units/s
-        const float walkSpeed = GameConstants::MOVEMENT_SPEED_MULTIPLIER * 1000.0f;
-
         // Uncapped Momentum Logic
         // "As long as you are not stopped by an object u gain momentum constantly"
 
@@ -944,13 +940,14 @@ void GameObject::keyboardCallBack(const float deltaTime) {
             float currentHorizontalSpeed = glm::length(glm::vec2(playerVelocity.x, playerVelocity.z));
 
             // Ensure a minimum start speed so we don't get stuck at 0
-            if (currentHorizontalSpeed < 5.0f) currentHorizontalSpeed = 5.0f;
+            if (currentHorizontalSpeed < GameConstants::WALK_SPEED) currentHorizontalSpeed = GameConstants::WALK_SPEED;
 
             // Add acceleration (Uncapped)
             currentHorizontalSpeed += accelerationSpeed * dtSec;
 
-            if (!uncapSpeedEnabled && currentHorizontalSpeed > 20.0f) {
-                currentHorizontalSpeed = 20.0f;
+            const float maxSpeed = platform::keyDown(SDL_SCANCODE_LCTRL) ? GameConstants::SPRINT_SPEED : GameConstants::WALK_SPEED;
+            if (!uncapSpeedEnabled && currentHorizontalSpeed > maxSpeed) {
+                currentHorizontalSpeed = maxSpeed;
             }
 
             // Apply speed in new direction instantly

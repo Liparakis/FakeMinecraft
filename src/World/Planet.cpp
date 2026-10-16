@@ -362,7 +362,7 @@ void Planet::renderShadows(const glm::mat4 &lightSpace) {
 }
 
 
-Planet::ReflectionCamera Planet::reflectionCamera(const glm::vec3 &cameraPos, const glm::vec3 &cameraFront, const float aspectRatio) {
+Planet::ReflectionCamera Planet::reflectionCamera(const glm::vec3 &cameraPos, const glm::vec3 &cameraFront, const glm::mat4 &projection) {
     const float waterLevel = static_cast<float>(WATER_LEVEL);
 
     // Mirror the camera below the water plane and flip its pitch.
@@ -373,8 +373,7 @@ Planet::ReflectionCamera Planet::reflectionCamera(const glm::vec3 &cameraPos, co
 
     return {
         glm::lookAt(reflectPos, reflectPos + reflectFront, glm::vec3(0, 1, 0)),
-        // Same reverse-Z setup as the main camera.
-        glm::perspective(glm::radians(90.0f), aspectRatio, 10000.0f, 0.1f),
+        projection,
     };
 }
 

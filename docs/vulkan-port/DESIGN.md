@@ -148,8 +148,9 @@ out to 16,448 blocks, the distance Minecraft reaches at render distance 1028.
 
 - **Tiles.** A quadtree of 32x32-sample tiles. Level 0 samples every 4 blocks,
   and each level doubles that up to level 8 (every 1,024 blocks). A tile splits
-  while the camera is closer than 4x its size, so a cell spans ~5 px on screen at
-  any distance. At 1.5x (~13 px steps) mountains read as giant cubes. Two worker threads build tiles
+  while the camera is closer than 4x its size, so a cell spans ~4 px on screen at
+  any distance (720p, 70° FOV). With 2.7x larger steps (1.5x) mountains read as
+  giant cubes. Two worker threads build tiles
   nearest-first straight from the terrain function: height, biome, water and a
   raised canopy for forests. No block data exists for them. While a tile builds,
   its nearest built ancestor (or built children) draws in its place.
