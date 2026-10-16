@@ -87,10 +87,14 @@ void Chunk::releaseMeshes() {
 
 // The last uploaded mesh keeps drawing while a newer one waits for upload, so edits never flicker.
 void Chunk::renderAllSolid() {
+    if (!worldMesh) return;
+    Renderer::get().pushChunkOrigin(origin());
     Renderer::get().draw(worldMesh);
 }
 
 void Chunk::renderAllCutout() const {
+    if (!cutoutMesh) return;
+    Renderer::get().pushChunkOrigin(origin());
     Renderer::get().draw(cutoutMesh);
 }
 
@@ -99,5 +103,7 @@ void Chunk::renderAllBillboard() const {
 }
 
 void Chunk::renderAllWater() const {
+    if (!waterMesh) return;
+    Renderer::get().pushChunkOrigin(origin());
     Renderer::get().draw(waterMesh);
 }

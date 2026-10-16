@@ -41,55 +41,54 @@ inline void emitGreedyQuad(const GreedyQuad &quad, const glm::vec3 &worldPos,
     const char uMax = quad.width;
     const char vMax = quad.height;
 
-    const float wx = worldPos.x;
+    // x and z are chunk-local (int16 positions wrap past 32,767); the shader adds the chunk origin.
     const float wy = worldPos.y;
-    const float wz = worldPos.z;
 
     const uint8_t light = quad.lightLevel;
 
     // Generate 4 vertices based on face direction
     switch (quad.dir) {
         case TOP:
-            vertices.emplace_back(quad.x + wx, quad.y + 1 + wy, quad.z + quad.height + wz, 0, 0, TOP, layerIndex, light);
-            vertices.emplace_back(quad.x + quad.width + wx, quad.y + 1 + wy, quad.z + quad.height + wz, uMax, 0, TOP,
+            vertices.emplace_back(quad.x, quad.y + 1 + wy, quad.z + quad.height, 0, 0, TOP, layerIndex, light);
+            vertices.emplace_back(quad.x + quad.width, quad.y + 1 + wy, quad.z + quad.height, uMax, 0, TOP,
                                   layerIndex, light);
-            vertices.emplace_back(quad.x + wx, quad.y + 1 + wy, quad.z + wz, 0, vMax, TOP, layerIndex, light);
-            vertices.emplace_back(quad.x + quad.width + wx, quad.y + 1 + wy, quad.z + wz, uMax, vMax, TOP, layerIndex, light);
+            vertices.emplace_back(quad.x, quad.y + 1 + wy, quad.z, 0, vMax, TOP, layerIndex, light);
+            vertices.emplace_back(quad.x + quad.width, quad.y + 1 + wy, quad.z, uMax, vMax, TOP, layerIndex, light);
             break;
         case BOTTOM:
-            vertices.emplace_back(quad.x + quad.width + wx, quad.y + wy, quad.z + quad.height + wz, uMax, vMax, BOTTOM,
+            vertices.emplace_back(quad.x + quad.width, quad.y + wy, quad.z + quad.height, uMax, vMax, BOTTOM,
                                   layerIndex, light);
-            vertices.emplace_back(quad.x + wx, quad.y + wy, quad.z + quad.height + wz, 0, vMax, BOTTOM, layerIndex, light);
-            vertices.emplace_back(quad.x + quad.width + wx, quad.y + wy, quad.z + wz, uMax, 0, BOTTOM, layerIndex, light);
-            vertices.emplace_back(quad.x + wx, quad.y + wy, quad.z + wz, 0, 0, BOTTOM, layerIndex, light);
+            vertices.emplace_back(quad.x, quad.y + wy, quad.z + quad.height, 0, vMax, BOTTOM, layerIndex, light);
+            vertices.emplace_back(quad.x + quad.width, quad.y + wy, quad.z, uMax, 0, BOTTOM, layerIndex, light);
+            vertices.emplace_back(quad.x, quad.y + wy, quad.z, 0, 0, BOTTOM, layerIndex, light);
             break;
         case NORTH:
-            vertices.emplace_back(quad.x + quad.width + wx, quad.y + wy, quad.z + wz, uMax, 0, NORTH, layerIndex, light);
-            vertices.emplace_back(quad.x + wx, quad.y + wy, quad.z + wz, 0, 0, NORTH, layerIndex, light);
-            vertices.emplace_back(quad.x + quad.width + wx, quad.y + quad.height + wy, quad.z + wz, uMax, vMax, NORTH,
+            vertices.emplace_back(quad.x + quad.width, quad.y + wy, quad.z, uMax, 0, NORTH, layerIndex, light);
+            vertices.emplace_back(quad.x, quad.y + wy, quad.z, 0, 0, NORTH, layerIndex, light);
+            vertices.emplace_back(quad.x + quad.width, quad.y + quad.height + wy, quad.z, uMax, vMax, NORTH,
                                   layerIndex, light);
-            vertices.emplace_back(quad.x + wx, quad.y + quad.height + wy, quad.z + wz, 0, vMax, NORTH, layerIndex, light);
+            vertices.emplace_back(quad.x, quad.y + quad.height + wy, quad.z, 0, vMax, NORTH, layerIndex, light);
             break;
         case SOUTH:
-            vertices.emplace_back(quad.x + wx, quad.y + wy, quad.z + 1 + wz, 0, 0, SOUTH, layerIndex, light);
-            vertices.emplace_back(quad.x + quad.width + wx, quad.y + wy, quad.z + 1 + wz, uMax, 0, SOUTH, layerIndex, light);
-            vertices.emplace_back(quad.x + wx, quad.y + quad.height + wy, quad.z + 1 + wz, 0, vMax, SOUTH, layerIndex, light);
-            vertices.emplace_back(quad.x + quad.width + wx, quad.y + quad.height + wy, quad.z + 1 + wz, uMax, vMax,
+            vertices.emplace_back(quad.x, quad.y + wy, quad.z + 1, 0, 0, SOUTH, layerIndex, light);
+            vertices.emplace_back(quad.x + quad.width, quad.y + wy, quad.z + 1, uMax, 0, SOUTH, layerIndex, light);
+            vertices.emplace_back(quad.x, quad.y + quad.height + wy, quad.z + 1, 0, vMax, SOUTH, layerIndex, light);
+            vertices.emplace_back(quad.x + quad.width, quad.y + quad.height + wy, quad.z + 1, uMax, vMax,
                                   SOUTH, layerIndex, light);
             break;
         case WEST:
-            vertices.emplace_back(quad.x + wx, quad.y + wy, quad.z + wz, 0, 0, WEST, layerIndex, light);
-            vertices.emplace_back(quad.x + wx, quad.y + wy, quad.z + quad.width + wz, uMax, 0, WEST, layerIndex, light);
-            vertices.emplace_back(quad.x + wx, quad.y + quad.height + wy, quad.z + wz, 0, vMax, WEST, layerIndex, light);
-            vertices.emplace_back(quad.x + wx, quad.y + quad.height + wy, quad.z + quad.width + wz, uMax, vMax, WEST,
+            vertices.emplace_back(quad.x, quad.y + wy, quad.z, 0, 0, WEST, layerIndex, light);
+            vertices.emplace_back(quad.x, quad.y + wy, quad.z + quad.width, uMax, 0, WEST, layerIndex, light);
+            vertices.emplace_back(quad.x, quad.y + quad.height + wy, quad.z, 0, vMax, WEST, layerIndex, light);
+            vertices.emplace_back(quad.x, quad.y + quad.height + wy, quad.z + quad.width, uMax, vMax, WEST,
                                   layerIndex, light);
             break;
         case EAST:
-            vertices.emplace_back(quad.x + 1 + wx, quad.y + wy, quad.z + quad.width + wz, uMax, 0, EAST, layerIndex, light);
-            vertices.emplace_back(quad.x + 1 + wx, quad.y + wy, quad.z + wz, 0, 0, EAST, layerIndex, light);
-            vertices.emplace_back(quad.x + 1 + wx, quad.y + quad.height + wy, quad.z + quad.width + wz, uMax, vMax,
+            vertices.emplace_back(quad.x + 1, quad.y + wy, quad.z + quad.width, uMax, 0, EAST, layerIndex, light);
+            vertices.emplace_back(quad.x + 1, quad.y + wy, quad.z, 0, 0, EAST, layerIndex, light);
+            vertices.emplace_back(quad.x + 1, quad.y + quad.height + wy, quad.z + quad.width, uMax, vMax,
                                   EAST, layerIndex, light);
-            vertices.emplace_back(quad.x + 1 + wx, quad.y + quad.height + wy, quad.z + wz, 0, vMax, EAST, layerIndex, light);
+            vertices.emplace_back(quad.x + 1, quad.y + quad.height + wy, quad.z, 0, vMax, EAST, layerIndex, light);
             break;
         default:
             break;

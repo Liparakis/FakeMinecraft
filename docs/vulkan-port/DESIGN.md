@@ -214,3 +214,15 @@ stair-step. With FXAA on (Video Settings, default; `FAKEMC_FXAA=0` turns it
 off), the main pass resolves into an offscreen `sceneColor` image instead of the
 swapchain, and the UI pass starts with one fullscreen FXAA 3.11 (quality)
 draw from it, so the UI stays sharp. It costs 0.06-0.07 ms at 1280x720.
+
+## Far coordinates (2026-10-17)
+
+Chunk, water and shadow vertices store positions as 16-bit integers (16-byte
+vertices), and they held world coordinates, which wrap past 32,767: block
+terrain beyond x or z = ±32k came out scrambled. Vertices now hold x and z
+relative to their chunk (0-32), and `world.vert`, `fluid.vert` and
+`shadow_world.vert` add the chunk's origin from a push constant (offset 64,
+after the shadow pass's light matrix; `Renderer::pushChunkOrigin`). y stays a
+world height, so mesh bounds and culling are unchanged, and plants keep their
+float world positions. Checked at z=33,500, (100000, 100000) and
+(-40000, -70000).

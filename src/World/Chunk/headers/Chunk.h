@@ -118,6 +118,8 @@ public:
     [[nodiscard]] bool hasBillboard() const { return static_cast<bool>(billboardMesh); }
     [[nodiscard]] bool hasWater() const { return static_cast<bool>(waterMesh); }
     [[nodiscard]] bool hasMesh() const { return hasSolid() || hasBillboard() || hasWater(); }
+    /// World position added to this chunk's chunk-local vertices (x, z; y is already world) in the shaders.
+    [[nodiscard]] glm::ivec3 origin() const { return {chunkPos.x * CHUNK_WIDTH, 0, chunkPos.z * CHUNK_WIDTH}; }
 
     // ========================================================================
     // PUBLIC MEMBER VARIABLES

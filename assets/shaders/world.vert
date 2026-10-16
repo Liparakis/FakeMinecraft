@@ -13,11 +13,16 @@ layout(location = 3) out float vSkyLight;
 layout(location = 4) out float vBlockLight;
 layout(location = 5) out vec4 FragPosLightSpace;
 
+// Chunk vertices are chunk-local in x and z (int16 would wrap past 32,767); this is the chunk's world origin.
+layout(push_constant) uniform Push {
+    layout(offset = 64) ivec4 chunkOrigin;
+} push;
+
 // Hardware clipping against the reflection plane, so the fragment shader needs no discard for it.
 out float gl_ClipDistance[1];
 
 void main() {
-    vec4 worldPos = vec4(vec3(aPos.xyz), 1.0);
+    vec4 worldPos = vec4(vec3(aPos.xyz + push.chunkOrigin.xyz), 1.0);
     gl_Position = frame.projection * frame.view * worldPos;
     gl_ClipDistance[0] = dot(worldPos, frame.clipPlane);
     FragPos = worldPos.xyz;

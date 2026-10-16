@@ -9,9 +9,9 @@ void Chunk::generateWorldFaces(const int x, const int y, const int z, FACE_DIREC
     auto& indices = cutoutIndices[subChunkIndex];
     currentVertex = static_cast<unsigned int>(vertices.size());
 
-    float wx = worldPos.x;
-    float wy = worldPos.y;
-    float wz = worldPos.z;
+    // x and z are chunk-local: vertices store int16 and world coordinates wrap past 32,767.
+    // The vertex shader adds the chunk origin (Renderer::pushChunkOrigin).
+    const float wy = worldPos.y;
 
     uint16_t layerIndex;
     if (faceDirection == TOP) {
@@ -24,40 +24,40 @@ void Chunk::generateWorldFaces(const int x, const int y, const int z, FACE_DIREC
 
     switch (faceDirection) {
     case NORTH:
-        vertices.emplace_back(x + 1 + wx, y + wy, z + wz, 1, 0, NORTH, layerIndex);
-        vertices.emplace_back(x + wx, y + wy, z + wz, 0, 0, NORTH, layerIndex);
-        vertices.emplace_back(x + 1 + wx, y + 1 + wy, z + wz, 1, 1, NORTH, layerIndex);
-        vertices.emplace_back(x + wx, y + 1 + wy, z + wz, 0, 1, NORTH, layerIndex);
+        vertices.emplace_back(x + 1, y + wy, z, 1, 0, NORTH, layerIndex);
+        vertices.emplace_back(x, y + wy, z, 0, 0, NORTH, layerIndex);
+        vertices.emplace_back(x + 1, y + 1 + wy, z, 1, 1, NORTH, layerIndex);
+        vertices.emplace_back(x, y + 1 + wy, z, 0, 1, NORTH, layerIndex);
         break;
     case SOUTH:
-        vertices.emplace_back(x + wx, y + wy, z + 1 + wz, 0, 0, SOUTH, layerIndex);
-        vertices.emplace_back(x + 1 + wx, y + wy, z + 1 + wz, 1, 0, SOUTH, layerIndex);
-        vertices.emplace_back(x + wx, y + 1 + wy, z + 1 + wz, 0, 1, SOUTH, layerIndex);
-        vertices.emplace_back(x + 1 + wx, y + 1 + wy, z + 1 + wz, 1, 1, SOUTH, layerIndex);
+        vertices.emplace_back(x, y + wy, z + 1, 0, 0, SOUTH, layerIndex);
+        vertices.emplace_back(x + 1, y + wy, z + 1, 1, 0, SOUTH, layerIndex);
+        vertices.emplace_back(x, y + 1 + wy, z + 1, 0, 1, SOUTH, layerIndex);
+        vertices.emplace_back(x + 1, y + 1 + wy, z + 1, 1, 1, SOUTH, layerIndex);
         break;
     case WEST:
-        vertices.emplace_back(x + wx, y + wy, z + wz, 0, 0, WEST, layerIndex);
-        vertices.emplace_back(x + wx, y + wy, z + 1 + wz, 1, 0, WEST, layerIndex);
-        vertices.emplace_back(x + wx, y + 1 + wy, z + wz, 0, 1, WEST, layerIndex);
-        vertices.emplace_back(x + wx, y + 1 + wy, z + 1 + wz, 1, 1, WEST, layerIndex);
+        vertices.emplace_back(x, y + wy, z, 0, 0, WEST, layerIndex);
+        vertices.emplace_back(x, y + wy, z + 1, 1, 0, WEST, layerIndex);
+        vertices.emplace_back(x, y + 1 + wy, z, 0, 1, WEST, layerIndex);
+        vertices.emplace_back(x, y + 1 + wy, z + 1, 1, 1, WEST, layerIndex);
         break;
     case EAST:
-        vertices.emplace_back(x + 1 + wx, y + wy, z + 1 + wz, 1, 0, EAST, layerIndex);
-        vertices.emplace_back(x + 1 + wx, y + wy, z + wz, 0, 0, EAST, layerIndex);
-        vertices.emplace_back(x + 1 + wx, y + 1 + wy, z + 1 + wz, 1, 1, EAST, layerIndex);
-        vertices.emplace_back(x + 1 + wx, y + 1 + wy, z + wz, 0, 1, EAST, layerIndex);
+        vertices.emplace_back(x + 1, y + wy, z + 1, 1, 0, EAST, layerIndex);
+        vertices.emplace_back(x + 1, y + wy, z, 0, 0, EAST, layerIndex);
+        vertices.emplace_back(x + 1, y + 1 + wy, z + 1, 1, 1, EAST, layerIndex);
+        vertices.emplace_back(x + 1, y + 1 + wy, z, 0, 1, EAST, layerIndex);
         break;
     case TOP:
-        vertices.emplace_back(x + wx, y + 1 + wy, z + 1 + wz, 0, 0, TOP, layerIndex);
-        vertices.emplace_back(x + 1 + wx, y + 1 + wy, z + 1 + wz, 1, 0, TOP, layerIndex);
-        vertices.emplace_back(x + wx, y + 1 + wy, z + wz, 0, 1, TOP, layerIndex);
-        vertices.emplace_back(x + 1 + wx, y + 1 + wy, z + wz, 1, 1, TOP, layerIndex);
+        vertices.emplace_back(x, y + 1 + wy, z + 1, 0, 0, TOP, layerIndex);
+        vertices.emplace_back(x + 1, y + 1 + wy, z + 1, 1, 0, TOP, layerIndex);
+        vertices.emplace_back(x, y + 1 + wy, z, 0, 1, TOP, layerIndex);
+        vertices.emplace_back(x + 1, y + 1 + wy, z, 1, 1, TOP, layerIndex);
         break;
     case BOTTOM:
-        vertices.emplace_back(x + 1 + wx, y + wy, z + 1 + wz, 1, 1, BOTTOM, layerIndex);
-        vertices.emplace_back(x + wx, y + wy, z + 1 + wz, 0, 1, BOTTOM, layerIndex);
-        vertices.emplace_back(x + 1 + wx, y + wy, z + wz, 1, 0, BOTTOM, layerIndex);
-        vertices.emplace_back(x + wx, y + wy, z + wz, 0, 0, BOTTOM, layerIndex);
+        vertices.emplace_back(x + 1, y + wy, z + 1, 1, 1, BOTTOM, layerIndex);
+        vertices.emplace_back(x, y + wy, z + 1, 0, 1, BOTTOM, layerIndex);
+        vertices.emplace_back(x + 1, y + wy, z, 1, 0, BOTTOM, layerIndex);
+        vertices.emplace_back(x, y + wy, z, 0, 0, BOTTOM, layerIndex);
         break;
     default:
         break;
@@ -158,9 +158,9 @@ void Chunk::generateLiquidFaces(const int x, const int y, const int z, const FAC
     auto& vertices = liquidVertices[subChunkIndex];
     auto& indices = liquidIndices[subChunkIndex];
 
-    float wx = worldPos.x;
-    float wy = worldPos.y;
-    float wz = worldPos.z;
+    // x and z are chunk-local: vertices store int16 and world coordinates wrap past 32,767.
+    // The vertex shader adds the chunk origin (Renderer::pushChunkOrigin).
+    const float wy = worldPos.y;
 
     uint16_t layerIndex = block->sideLayer; 
     
@@ -176,34 +176,34 @@ void Chunk::generateLiquidFaces(const int x, const int y, const int z, const FAC
 
     switch (faceDirection) {
     case NORTH:
-        vertices.emplace_back(x + 1 + wx, y + wy, z + wz, 1, 0, NORTH, layerIndex, liquidTopValue, light);
-        vertices.emplace_back(x + wx, y + topY + wy, z + wz, 0, 1, NORTH, layerIndex, liquidTopValue, light);
-        vertices.emplace_back(x + 1 + wx, y + topY + wy, z + wz, 1, 1, NORTH, layerIndex, liquidTopValue, light);
-        vertices.emplace_back(x + wx, y + wy, z + wz, 0, 0, NORTH, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x + 1, y + wy, z, 1, 0, NORTH, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x, y + topY + wy, z, 0, 1, NORTH, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x + 1, y + topY + wy, z, 1, 1, NORTH, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x, y + wy, z, 0, 0, NORTH, layerIndex, liquidTopValue, light);
         break;
     case SOUTH:
-        vertices.emplace_back(x + wx, y + wy, z + 1 + wz, 0, 0, SOUTH, layerIndex, liquidTopValue, light);
-        vertices.emplace_back(x + 1 + wx, y + topY + wy, z + 1 + wz, 1, 1, SOUTH, layerIndex, liquidTopValue, light);
-        vertices.emplace_back(x + wx, y + topY + wy, z + 1 + wz, 0, 1, SOUTH, layerIndex, liquidTopValue, light);
-        vertices.emplace_back(x + 1 + wx, y + wy, z + 1 + wz, 1, 0, SOUTH, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x, y + wy, z + 1, 0, 0, SOUTH, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x + 1, y + topY + wy, z + 1, 1, 1, SOUTH, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x, y + topY + wy, z + 1, 0, 1, SOUTH, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x + 1, y + wy, z + 1, 1, 0, SOUTH, layerIndex, liquidTopValue, light);
         break;
     case WEST:
-        vertices.emplace_back(x + wx, y + wy, z + wz, 0, 0, WEST, layerIndex, liquidTopValue, light);
-        vertices.emplace_back(x + wx, y + topY + wy, z + 1 + wz, 1, 1, WEST, layerIndex, liquidTopValue, light);
-        vertices.emplace_back(x + wx, y + topY + wy, z + wz, 0, 1, WEST, layerIndex, liquidTopValue, light);
-        vertices.emplace_back(x + wx, y + wy, z + 1 + wz, 1, 0, WEST, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x, y + wy, z, 0, 0, WEST, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x, y + topY + wy, z + 1, 1, 1, WEST, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x, y + topY + wy, z, 0, 1, WEST, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x, y + wy, z + 1, 1, 0, WEST, layerIndex, liquidTopValue, light);
         break;
     case EAST:
         // Target: v0(RB), v1(TL), v2(TR), v3(BL)
         // Look from +X. Right is Z+1. Left is Z.
         // RB: y, z+1.
-        vertices.emplace_back(x + 1 + wx, y + wy, z + 1 + wz, 1, 0, EAST, layerIndex, liquidTopValue, light); // v0 (RB)
+        vertices.emplace_back(x + 1, y + wy, z + 1, 1, 0, EAST, layerIndex, liquidTopValue, light); // v0 (RB)
         // TL: y+t, z.
-        vertices.emplace_back(x + 1 + wx, y + topY + wy, z + wz, 0, 1, EAST, layerIndex, liquidTopValue, light); // v1 (TL)
+        vertices.emplace_back(x + 1, y + topY + wy, z, 0, 1, EAST, layerIndex, liquidTopValue, light); // v1 (TL)
         // TR: y+t, z+1.
-        vertices.emplace_back(x + 1 + wx, y + topY + wy, z + 1 + wz, 1, 1, EAST, layerIndex, liquidTopValue, light); // v2 (TR)
+        vertices.emplace_back(x + 1, y + topY + wy, z + 1, 1, 1, EAST, layerIndex, liquidTopValue, light); // v2 (TR)
         // BL: y, z.
-        vertices.emplace_back(x + 1 + wx, y + wy, z + wz, 0, 0, EAST, layerIndex, liquidTopValue, light); // v3 (BL)
+        vertices.emplace_back(x + 1, y + wy, z, 0, 0, EAST, layerIndex, liquidTopValue, light); // v3 (BL)
         break;
     case TOP:
         // Target: +Y.
@@ -218,13 +218,13 @@ void Chunk::generateLiquidFaces(const int x, const int y, const int z, const FAC
         
         // So we need:
         // v0 (RB): x+1, z+1.
-        vertices.emplace_back(x + 1 + wx, y + topY + wy, z + 1 + wz, 1, 0, TOP, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x + 1, y + topY + wy, z + 1, 1, 0, TOP, layerIndex, liquidTopValue, light);
         // v1 (TL): x, z.
-        vertices.emplace_back(x + wx, y + topY + wy, z + wz, 0, 1, TOP, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x, y + topY + wy, z, 0, 1, TOP, layerIndex, liquidTopValue, light);
         // v2 (TR): x+1, z.
-        vertices.emplace_back(x + 1 + wx, y + topY + wy, z + wz, 1, 1, TOP, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x + 1, y + topY + wy, z, 1, 1, TOP, layerIndex, liquidTopValue, light);
         // v3 (BL): x, z+1.
-        vertices.emplace_back(x + wx, y + topY + wy, z + 1 + wz, 0, 0, TOP, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x, y + topY + wy, z + 1, 0, 0, TOP, layerIndex, liquidTopValue, light);
         break;
     case BOTTOM:
         // Target: -Y.
@@ -267,13 +267,13 @@ void Chunk::generateLiquidFaces(const int x, const int y, const int z, const FAC
         // Let's just write explicit coords that work.
         
         // v0: x+1, z+1.
-        vertices.emplace_back(x + 1 + wx, y + wy, z + 1 + wz, 1, 1, BOTTOM, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x + 1, y + wy, z + 1, 1, 1, BOTTOM, layerIndex, liquidTopValue, light);
         // v1: x, z.
-        vertices.emplace_back(x + wx, y + wy, z + wz, 0, 0, BOTTOM, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x, y + wy, z, 0, 0, BOTTOM, layerIndex, liquidTopValue, light);
         // v2: x, z+1.
-        vertices.emplace_back(x + wx, y + wy, z + 1 + wz, 1, 0, BOTTOM, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x, y + wy, z + 1, 1, 0, BOTTOM, layerIndex, liquidTopValue, light);
         // v3: x+1, z.
-        vertices.emplace_back(x + 1 + wx, y + wy, z + wz, 0, 1, BOTTOM, layerIndex, liquidTopValue, light);
+        vertices.emplace_back(x + 1, y + wy, z, 0, 1, BOTTOM, layerIndex, liquidTopValue, light);
         break;
     default:
         break;

@@ -62,6 +62,7 @@ public:
     static constexpr uint32_t SHADOW_SIZE = 4096;
     static constexpr uint32_t REFLECTION_SIZE = 1024;
     static constexpr uint32_t PUSH_CONSTANT_SIZE = 128;
+    static constexpr uint32_t CHUNK_ORIGIN_OFFSET = 64; ///< `chunkOrigin` in world.vert, fluid.vert, shadow_world.vert.
     /// The chunk mask covers 128x128 chunks around the camera, indexed by chunk coordinate mod 128.
     static constexpr uint32_t CHUNK_MASK_SIZE = 128;
 
@@ -122,6 +123,8 @@ public:
     /// Binds the pipeline for the current pass and the matching frame descriptor set.
     void bindPipeline(PipelineId id);
     void bindTexture(TextureId texture);
+    /// World position of the chunk drawn next; chunk vertices are chunk-local in x and z (world.vert).
+    void pushChunkOrigin(const glm::ivec3 &origin);
     void pushConstants(const void *data, uint32_t size);
     void setLineWidth(float width);
 

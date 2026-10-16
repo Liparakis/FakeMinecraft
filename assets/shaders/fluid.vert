@@ -15,11 +15,16 @@ layout(location = 4) out float vBlockLight;
 layout(location = 5) out vec4 FragPosLightSpace;
 layout(location = 6) out vec4 FragPosReflectionSpace;
 
+// Chunk vertices are chunk-local in x and z (int16 would wrap past 32,767); this is the chunk's world origin.
+layout(push_constant) uniform Push {
+    layout(offset = 64) ivec4 chunkOrigin;
+} push;
+
 const int FRAMES = 32;
 const float ANIMATION_SECONDS = 5.0;
 
 void main() {
-    vec3 pos = vec3(aPos.xyz);
+    vec3 pos = vec3(aPos.xyz + push.chunkOrigin.xyz);
     if (aTop != 0u) {
         pos.y -= 0.1;
         pos.y += (sin(pos.x * 1.5708 + frame.time) + sin(pos.z * 1.5708 + frame.time * 1.5)) * 0.05;

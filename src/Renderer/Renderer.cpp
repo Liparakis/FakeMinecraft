@@ -905,6 +905,13 @@ void Renderer::pushConstants(const void *data, const uint32_t size) {
     vkCmdPushConstants(ctx().cmd(), pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, size, data);
 }
 
+void Renderer::pushChunkOrigin(const glm::ivec3 &origin) {
+    // After the shadow pass's light matrix (offset 0), so both fit in one push constant range.
+    const glm::ivec4 data(origin, 0);
+    vkCmdPushConstants(ctx().cmd(), pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       CHUNK_ORIGIN_OFFSET, sizeof(data), &data);
+}
+
 void Renderer::setLineWidth(const float width) {
     vkCmdSetLineWidth(ctx().cmd(), ctx().wideLines ? width : 1.0f);
 }
