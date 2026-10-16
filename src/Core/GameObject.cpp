@@ -139,6 +139,7 @@ void GameObject::init() {
     // FAKEMC_RESIZE="WxH" resizes the window halfway to the screenshot; FAKEMC_MSAA=0 starts with MSAA off.
     // Both exercise swapchain and pipeline rebuilds in automated checks.
     int resizeW = 0, resizeH = 0;
+    int minimizeStep = std::getenv("FAKEMC_MINIMIZE") ? 1 : 0;
     if (const char *resize = std::getenv("FAKEMC_RESIZE")) std::sscanf(resize, "%dx%d", &resizeW, &resizeH);
     if (const char *msaa = std::getenv("FAKEMC_MSAA"); msaa && msaa[0] == '0') {
         msaaEnabled = false;
@@ -153,6 +154,14 @@ void GameObject::init() {
     while (platform::pumpEvents()) {
         if (platform::consumeResized()) onResize();
 
+        // FAKEMC_MINIMIZE=1 minimizes the window at a third of the run and restores it at two thirds.
+        if (minimizeStep == 1 && platform::timeMs() >= screenshotMs / 3.0f) {
+            SDL_MinimizeWindow(platform::window());
+            minimizeStep = 2;
+        } else if (minimizeStep == 2 && platform::timeMs() >= screenshotMs * 2.0f / 3.0f) {
+            SDL_RestoreWindow(platform::window());
+            minimizeStep = 0;
+        }
         if (resizeW > 0 && platform::timeMs() >= screenshotMs * 0.5f) {
             SDL_SetWindowSize(platform::window(), resizeW, resizeH);
             resizeW = 0;

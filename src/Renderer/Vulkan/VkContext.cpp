@@ -309,6 +309,15 @@ void VkContext::destroySwapchain() {
     swapchain = VK_NULL_HANDLE;
 }
 
+VkExtent2D VkContext::surfaceExtent() const {
+    VkSurfaceCapabilitiesKHR caps;
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &caps);
+    if (caps.currentExtent.width != UINT32_MAX) return caps.currentExtent;
+    int w = 0, h = 0;
+    SDL_Vulkan_GetDrawableSize(window, &w, &h);
+    return {static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
+}
+
 void VkContext::recreateSwapchain(const bool vsync) {
     vkDeviceWaitIdle(device);
     destroySwapchain();

@@ -72,7 +72,7 @@ device-local and filled by staging copies recorded before the first pass.
 Automated checks run the game in the background without taking focus:
 `FAKEMC_SCREENSHOT=<file.bmp>` saves a frame after `FAKEMC_SCREENSHOT_AT`
 seconds and quits; `FAKEMC_SCREENSHOT_PLAYING`, `FAKEMC_CAMERA="x,y,z,yaw,pitch"`,
-`FAKEMC_RESIZE=WxH`, `FAKEMC_MSAA=0` and `FAKEMC_FPS_CAP` set up the scene.
+`FAKEMC_RESIZE=WxH`, `FAKEMC_MINIMIZE=1`, `FAKEMC_MSAA=0` and `FAKEMC_FPS_CAP` set up the scene.
 
 Not verified automatically: mouse/keyboard interaction (block breaking and
 placing, menus, fullscreen toggle) and sound.

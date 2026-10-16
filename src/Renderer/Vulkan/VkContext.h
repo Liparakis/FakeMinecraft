@@ -45,6 +45,9 @@ public:
     void init(SDL_Window *window, bool vsync);
     void shutdown();
 
+    /// Size the surface wants right now; 0x0 while the window is minimized.
+    [[nodiscard]] VkExtent2D surfaceExtent() const;
+
     /// Rebuilds the swapchain for the window's current size and the given present mode.
     void recreateSwapchain(bool vsync);
 

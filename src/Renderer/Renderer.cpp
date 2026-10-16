@@ -534,9 +534,9 @@ void Renderer::setVsync(const bool enabled) {
 
 bool Renderer::beginFrame() {
     if (swapchainStale) {
-        int w = 0, h = 0;
-        SDL_Vulkan_GetDrawableSize(window, &w, &h);
-        if (w == 0 || h == 0) return false;
+        // A minimized window has a 0x0 surface, which no swapchain can match; skip frames until it returns.
+        const VkExtent2D surface = ctx().surfaceExtent();
+        if (surface.width == 0 || surface.height == 0) return false;
         ctx().recreateSwapchain(vsync);
         destroyTargets();
         createTargets();
