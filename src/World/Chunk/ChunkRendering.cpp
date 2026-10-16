@@ -137,9 +137,11 @@ void Chunk::uploadMesh() {
             subChunks[i].numTrianglesWorld = worldIndices[i].size();
         }
         
-        glGenVertexArrays(1, &mergedWorldVAO);
-        glGenBuffers(1, &mergedWorldVBO);
-        glGenBuffers(1, &mergedWorldEBO);
+        if (!mergedWorldVAO) {
+            glGenVertexArrays(1, &mergedWorldVAO);
+            glGenBuffers(1, &mergedWorldVBO);
+            glGenBuffers(1, &mergedWorldEBO);
+        }
         glBindVertexArray(mergedWorldVAO);
         glBindBuffer(GL_ARRAY_BUFFER, mergedWorldVBO);
         glBufferData(GL_ARRAY_BUFFER, stagingWorldVerts.size() * sizeof(WorldVertex), stagingWorldVerts.data(), GL_STATIC_DRAW);
@@ -166,9 +168,11 @@ void Chunk::uploadMesh() {
             subChunks[i].numTrianglesBillboard = billboardIndices[i].size();
         }
         
-        glGenVertexArrays(1, &mergedBillboardVAO);
-        glGenBuffers(1, &mergedBillboardVBO);
-        glGenBuffers(1, &mergedBillboardEBO);
+        if (!mergedBillboardVAO) {
+            glGenVertexArrays(1, &mergedBillboardVAO);
+            glGenBuffers(1, &mergedBillboardVBO);
+            glGenBuffers(1, &mergedBillboardEBO);
+        }
         glBindVertexArray(mergedBillboardVAO);
         glBindBuffer(GL_ARRAY_BUFFER, mergedBillboardVBO);
         glBufferData(GL_ARRAY_BUFFER, stagingBillboardVerts.size() * sizeof(BillboardVertex), stagingBillboardVerts.data(), GL_STATIC_DRAW);
@@ -195,9 +199,11 @@ void Chunk::uploadMesh() {
             subChunks[i].numTrianglesLiquid = liquidIndices[i].size();
         }
         
-        glGenVertexArrays(1, &mergedWaterVAO);
-        glGenBuffers(1, &mergedWaterVBO);
-        glGenBuffers(1, &mergedWaterEBO);
+        if (!mergedWaterVAO) {
+            glGenVertexArrays(1, &mergedWaterVAO);
+            glGenBuffers(1, &mergedWaterVBO);
+            glGenBuffers(1, &mergedWaterEBO);
+        }
         glBindVertexArray(mergedWaterVAO);
         glBindBuffer(GL_ARRAY_BUFFER, mergedWaterVBO);
         glBufferData(GL_ARRAY_BUFFER, stagingWaterVerts.size() * sizeof(FluidVertex), stagingWaterVerts.data(), GL_STATIC_DRAW);

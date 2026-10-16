@@ -7,6 +7,7 @@
 
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <queue>
 #include <glm/glm.hpp>
 #include <thread>
@@ -71,7 +72,7 @@ public:
     unsigned int depthMapFBO = 0;
     unsigned int depthMap = 0;
     const unsigned int SHADOW_WIDTH = 4096, SHADOW_HEIGHT = 4096;
-    float shadowDistance = 1100.0f; // How far away we want shadows to render
+    float shadowDistance = 256.0f; // Half-width of the shadow map in blocks; also limits which chunks cast shadows
     glm::mat4 lightSpaceMatrix;
 
     // Stuff for reflections
@@ -164,6 +165,7 @@ private:
     std::queue<ChunkPos> chunkQueue;     ///< Chunks that need to be created.
     std::queue<ChunkPos> chunkDataQueue; ///< Chunks that need our noise algorithm to run.
     std::queue<ChunkPos> regenQueue;    ///< Chunks that need their 3D mesh rebuilt.
+    std::unordered_set<ChunkPos, ChunkPosHash> regenPending; ///< Dedupes regenQueue so a chunk is remeshed once per batch of neighbour loads.
     std::atomic<unsigned int> chunksLoading{0}; ///< How many things are currently loading.
     /** @} */
 

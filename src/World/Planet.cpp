@@ -144,6 +144,7 @@ void Planet::update(const glm::vec3 &cameraPos, bool updateOcclusion) {
             chunkQueue = {};
             chunkDataQueue = {};
             regenQueue = {};
+            regenPending.clear();
         }
         return;
     }
@@ -454,6 +455,17 @@ void Planet::renderShadows(Shader* shader) {
 
 
 void Planet::renderReflection(const glm::vec3 &cameraPos, const glm::vec3 &cameraFront, float aspectRatio) {
+    // waterChunks is last frame's visible water; with none on screen the reflection is never sampled.
+    if (waterChunks.empty()) return;
+
+    // Distant reflections are tiny and distorted by the water shader, so only nearby chunks are drawn.
+    constexpr float REFLECTION_RANGE = 8.0f * CHUNK_WIDTH;
+    auto inReflectionRange = [&](const Chunk *chunk) {
+        const float dx = chunk->cullingCenter.x - cameraPos.x;
+        const float dz = chunk->cullingCenter.z - cameraPos.z;
+        return dx * dx + dz * dz <= REFLECTION_RANGE * REFLECTION_RANGE;
+    };
+
     glViewport(0, 0, REFLECTION_WIDTH, REFLECTION_HEIGHT);
     glBindFramebuffer(GL_FRAMEBUFFER, reflectionFBO);
     
@@ -516,7 +528,7 @@ void Planet::renderReflection(const glm::vec3 &cameraPos, const glm::vec3 &camer
         if (chunkMaxY < waterLevel - 2.0f) continue;  // 2 block margin
 
         // Perform Frustum Culling against Reflection Frustum
-        if (reflectionFrustum.isBoxVisible(chunk->cullingCenter, chunk->cullingExtents)) {
+        if (inReflectionRange(chunk) && reflectionFrustum.isBoxVisible(chunk->cullingCenter, chunk->cullingExtents)) {
             chunk->renderAllSolid();
         }
     }
@@ -536,7 +548,7 @@ void Planet::renderReflection(const glm::vec3 &cameraPos, const glm::vec3 &camer
         const float chunkMaxY = chunk->chunkPos.y * CHUNK_HEIGHT + CHUNK_HEIGHT;
         if (chunkMaxY < waterLevel - 2.0f) continue;
 
-        if (reflectionFrustum.isBoxVisible(chunk->cullingCenter, chunk->cullingExtents)) {
+        if (inReflectionRange(chunk) && reflectionFrustum.isBoxVisible(chunk->cullingCenter, chunk->cullingExtents)) {
             chunk->renderAllBillboard();
         }
     }
@@ -633,6 +645,7 @@ void Planet::processRegenQueue() {
 
     const ChunkPos chunkPos = regenQueue.front();
     regenQueue.pop();
+    regenPending.erase(chunkPos);
 
     auto it = chunks.find(chunkPos);
     if (it != chunks.end()) {
@@ -871,7 +884,7 @@ void Planet::processChunkQueue() {
             auto it = chunks.find(nPos);
             if (it != chunks.end()) {
                 it->second->*dataPtrs[i] = chunk->chunkData;
-                regenQueue.push(nPos);
+                if (regenPending.insert(nPos).second) regenQueue.push(nPos);
             }
         }
     } else {

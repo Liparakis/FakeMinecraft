@@ -55,8 +55,10 @@ float calculateShadow(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir)
         shadow += projCoords.z - bias > pcfDepth ? 1.0 : 0.0;
     }
     shadow /= 16.0;
-    
-    return shadow;
+
+    // Fade out towards the edge of the shadow map instead of cutting off in a hard line.
+    vec2 edge = abs(projCoords.xy * 2.0 - 1.0);
+    return shadow * (1.0 - smoothstep(0.8, 1.0, max(edge.x, edge.y)));
 }
 
 void main()
