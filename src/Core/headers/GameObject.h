@@ -206,10 +206,17 @@ private:
     
     Checkbox dynamicShadowsBox;
     Checkbox msaaBox;
+    Checkbox fancyLeavesBox;
 
     bool dynamicShadowsEnabled = true;
     bool msaaEnabled = true;
     bool simpleLightingEnabled = false;
+
+    /** @name Shadow map cache (see renderFrame) @{ */
+    glm::mat4 cachedLightSpace{1.0f};
+    bool cachedShadowsOn = false;
+    bool shadowCacheValid = false;
+    /** @} */
     /** @} */
 
     std::string window_name;

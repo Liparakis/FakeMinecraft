@@ -49,7 +49,7 @@ struct alignas(16) FrameUniforms {
 };
 
 enum class PipelineId : uint8_t {
-    World, Billboard, Fluid, Sky, Outline, Model, ShadowWorld, ShadowBillboard, UI
+    World, WorldOpaque, Billboard, Fluid, Sky, Outline, Model, ShadowWorld, ShadowBillboard, UI
 };
 
 using TextureId = uint32_t;
@@ -82,6 +82,12 @@ public:
 
     /// Saves the next presented frame as a 24-bit BMP (used for automated visual checks).
     void requestScreenshot(const std::string &path) { screenshotPath = path; }
+
+    /// FAKEMC_PROFILE=1: GPU time per pass (timestamp queries) and CPU sections, printed every 2 s.
+    /// mark() closes a GPU section ending at the current point of the command buffer.
+    void mark(const char *section);
+    /// Adds CPU time to a named section of the profile.
+    void addCpuTime(const char *section, double ms);
 
     void setVsync(bool vsync);
     void setMsaa(bool enabled) { msaa = enabled; }
@@ -151,6 +157,7 @@ private:
     GpuImage textureArray, shadowMap, reflectionColor, reflectionDepth;
     GpuImage msaaColor, msaaDepth, depth;
     VkSampler blockSampler = VK_NULL_HANDLE, nearestClamp = VK_NULL_HANDLE, linearClamp = VK_NULL_HANDLE;
+    VkSampler shadowSampler = VK_NULL_HANDLE; ///< Linear depth-compare sampler (hardware PCF).
 
     VkDescriptorSetLayout frameSetLayout = VK_NULL_HANDLE, textureSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
@@ -170,6 +177,20 @@ private:
     TextureId whiteTexture = 0;
 
     std::string screenshotPath;
+
+    struct Profiler {
+        static constexpr uint32_t MAX_MARKS = 16;
+        bool enabled = false;
+        VkQueryPool pool = VK_NULL_HANDLE;
+        double nsPerTick = 1.0;
+        const char *labels[VkContext::FRAMES_IN_FLIGHT][MAX_MARKS] = {};
+        uint32_t count[VkContext::FRAMES_IN_FLIGHT] = {};
+        std::vector<std::pair<const char *, double>> gpu, cpu; ///< Accumulated ms per section.
+        uint32_t frames = 0;
+        double lastReport = 0.0;
+        void accumulate(std::vector<std::pair<const char *, double>> &into, const char *section, double ms);
+    } profiler;
+    void collectProfile();
 
     std::map<PipelineKey, VkPipeline> pipelines;
     std::map<std::string, VkShaderModule> shaders;

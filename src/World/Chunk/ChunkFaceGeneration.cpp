@@ -4,8 +4,10 @@
 // Helper to create block faces for the world mesh.
 void Chunk::generateWorldFaces(const int x, const int y, const int z, FACE_DIRECTION faceDirection, const Block *block,
                                unsigned int &currentVertex, const int subChunkIndex) {
-    auto& vertices = worldVertices[subChunkIndex];
-    auto& indices = worldIndices[subChunkIndex];
+    // Only see-through blocks reach this path (solids and leaves are greedy-meshed), so it feeds the cutout mesh.
+    auto& vertices = cutoutVertices[subChunkIndex];
+    auto& indices = cutoutIndices[subChunkIndex];
+    currentVertex = static_cast<unsigned int>(vertices.size());
 
     float wx = worldPos.x;
     float wy = worldPos.y;

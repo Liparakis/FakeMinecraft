@@ -41,6 +41,7 @@ void Chunk::mergeMeshes() {
     float minY = static_cast<float>(INT16_MAX), maxY = static_cast<float>(INT16_MIN);
     for (int i = 0; i < NUM_SUBCHUNKS; ++i) {
         for (const auto &v : worldVertices[i]) { minY = std::min<float>(minY, v.posY); maxY = std::max<float>(maxY, v.posY); }
+        for (const auto &v : cutoutVertices[i]) { minY = std::min<float>(minY, v.posY); maxY = std::max<float>(maxY, v.posY); }
         for (const auto &v : billboardVertices[i]) { minY = std::min(minY, v.posY); maxY = std::max(maxY, v.posY); }
         for (const auto &v : liquidVertices[i]) { minY = std::min<float>(minY, v.posY); maxY = std::max<float>(maxY, v.posY); }
     }
@@ -48,6 +49,7 @@ void Chunk::mergeMeshes() {
     meshMaxY = maxY;
 
     mergeSubChunks(worldVertices, worldIndices, subChunks, &SubChunk::numTrianglesWorld, mergedWorldVertices, mergedWorldIndices);
+    mergeSubChunks(cutoutVertices, cutoutIndices, subChunks, &SubChunk::numTrianglesCutout, mergedCutoutVertices, mergedCutoutIndices);
     mergeSubChunks(billboardVertices, billboardIndices, subChunks, &SubChunk::numTrianglesBillboard, mergedBillboardVertices, mergedBillboardIndices);
     mergeSubChunks(liquidVertices, liquidIndices, subChunks, &SubChunk::numTrianglesLiquid, mergedWaterVertices, mergedWaterIndices);
 }
@@ -66,6 +68,7 @@ bool Chunk::uploadMesh() {
     }
 
     upload(worldMesh, mergedWorldVertices, mergedWorldIndices);
+    upload(cutoutMesh, mergedCutoutVertices, mergedCutoutIndices);
     upload(billboardMesh, mergedBillboardVertices, mergedBillboardIndices);
     upload(waterMesh, mergedWaterVertices, mergedWaterIndices);
     for (SubChunk &sub : subChunks) sub.ready = true;
@@ -77,6 +80,7 @@ bool Chunk::uploadMesh() {
 void Chunk::releaseMeshes() {
     Renderer &renderer = Renderer::get();
     renderer.releaseMesh(worldMesh);
+    renderer.releaseMesh(cutoutMesh);
     renderer.releaseMesh(billboardMesh);
     renderer.releaseMesh(waterMesh);
 }
@@ -84,6 +88,10 @@ void Chunk::releaseMeshes() {
 // The last uploaded mesh keeps drawing while a newer one waits for upload, so edits never flicker.
 void Chunk::renderAllSolid() {
     Renderer::get().draw(worldMesh);
+}
+
+void Chunk::renderAllCutout() const {
+    Renderer::get().draw(cutoutMesh);
 }
 
 void Chunk::renderAllBillboard() const {

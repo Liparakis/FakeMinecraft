@@ -8,6 +8,7 @@
 #include <SDL2/SDL_mouse.h>
 #include "TextureManager.h"
 #include "Blocks.h"
+#include "ChunkUtils.h"
 #include "../World/Generation/BiomeRegistry.h"
 #include "SDL2/SDL_timer.h"
 
@@ -235,6 +236,7 @@ void GameObject::initializeUIElements() {
 
     dynamicShadowsBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y - 20, 30);
     msaaBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 40, 30);
+    fancyLeavesBox = Checkbox(cachedWindowCenter.x + 80, cachedWindowCenter.y + 100, 30);
     dynamicShadowsBox.setChecked(true);
     msaaBox.setChecked(true);
 }
@@ -268,6 +270,7 @@ void GameObject::onResize() {
 
     dynamicShadowsBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y - 20);
     msaaBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 40);
+    fancyLeavesBox.setDimensions(cachedWindowCenter.x + 80, cachedWindowCenter.y + 100);
 
     cachedMatrices.dirty = true;
     Renderer::get().onResize();
@@ -289,22 +292,26 @@ glm::mat4 GameObject::computeLightSpace() const {
         const float azimuth = std::round(std::atan2(sunNorm.z, sunNorm.x) / angleQuantization) * angleQuantization;
         const float elevation = std::round(std::asin(sunNorm.y) / angleQuantization) * angleQuantization;
         const float cosElev = std::cos(elevation);
-        sunTo = glm::vec3(std::cos(azimuth) * cosElev, std::sin(elevation), std::sin(azimuth) * cosElev) * sunLength;
+        // Unit length on purpose: scaling by sunLength would let float noise leak back in, changing the
+        // matrix every frame and defeating the shadow cache.
+        sunTo = glm::vec3(std::cos(azimuth) * cosElev, std::sin(elevation), std::sin(azimuth) * cosElev);
     }
 
     // Choose an up vector that avoids degeneracy when the sun is near the zenith.
     glm::vec3 lightUp(0.0f, 1.0f, 0.0f);
     if (std::abs(glm::dot(glm::normalize(sunTo), lightUp)) > 0.99f) lightUp = glm::vec3(0.0f, 0.0f, 1.0f);
 
-    // Snap the shadow centre to the texel grid so shadows stay stable while moving.
+    // Snap the shadow centre to a 16-block grid (a whole number of texels) so shadows stay stable
+    // while moving and the cached shadow map only needs re-rendering when the camera crosses a step.
     const float worldUnitsPerTexel = (2.0f * shadowDist) / static_cast<float>(Renderer::SHADOW_SIZE);
+    const float snapStep = std::round(16.0f / worldUnitsPerTexel) * worldUnitsPerTexel;
     const glm::vec3 lightDir = glm::normalize(-sunTo);
     const glm::vec3 lightRight = glm::normalize(glm::cross(lightUp, lightDir));
     const glm::vec3 lightFinalUp = glm::cross(lightDir, lightRight);
 
-    const float centerX = glm::floor(glm::dot(camera.Position, lightRight) / worldUnitsPerTexel) * worldUnitsPerTexel;
-    const float centerY = glm::floor(glm::dot(camera.Position, lightFinalUp) / worldUnitsPerTexel) * worldUnitsPerTexel;
-    const float centerZ = glm::dot(camera.Position, lightDir);
+    const float centerX = glm::floor(glm::dot(camera.Position, lightRight) / snapStep) * snapStep;
+    const float centerY = glm::floor(glm::dot(camera.Position, lightFinalUp) / snapStep) * snapStep;
+    const float centerZ = glm::floor(glm::dot(camera.Position, lightDir) / snapStep) * snapStep;
     const glm::vec3 snappedCenter = lightRight * centerX + lightFinalUp * centerY + lightDir * centerZ;
 
     const glm::mat4 lightView = glm::lookAt(snappedCenter + sunTo * 100.0f, snappedCenter, lightUp);
@@ -355,13 +362,25 @@ void GameObject::renderFrame() {
     renderer.setUniforms(mainUniforms, reflectionUniforms);
 
     // Chunk uploads are recorded here, before any pass begins.
+    const Uint64 prepareStart = SDL_GetPerformanceCounter();
     Planet::planet->prepare(freecamActive ? savedPlayerPosition : camera.Position);
     renderer.finishUploads();
+    renderer.mark("uploads");
+    const Uint64 recordStart = SDL_GetPerformanceCounter();
 
-    // With dynamic shadows off the pass still runs, leaving a cleared (shadow-free) map.
-    renderer.beginShadowPass();
-    if (dynamicShadowsEnabled && !simpleLightingEnabled) Planet::planet->renderShadows(lightSpace);
-    renderer.endPass();
+    // The shadow map is cached: it is re-rendered only when the snapped light matrix changes, a shadow
+    // caster near the camera was (re)uploaded or removed, or shadows were toggled. Turning shadows off
+    // renders one empty pass, which leaves a cleared (shadow-free) map.
+    const bool shadowsOn = dynamicShadowsEnabled && !simpleLightingEnabled;
+    const bool castersChanged = Planet::planet->consumeShadowDirty();
+    if (!shadowCacheValid || shadowsOn != cachedShadowsOn || (shadowsOn && (lightSpace != cachedLightSpace || castersChanged))) {
+        renderer.beginShadowPass();
+        if (shadowsOn) Planet::planet->renderShadows(lightSpace);
+        renderer.endPass();
+        cachedLightSpace = lightSpace;
+        cachedShadowsOn = shadowsOn;
+        shadowCacheValid = true;
+    }
 
     if (Planet::planet->hasVisibleWater()) {
         renderer.beginReflectionPass(glm::vec3(0.5f, 0.7f, 1.0f));
@@ -381,7 +400,15 @@ void GameObject::renderFrame() {
     ui::flush(windowX, windowY);
     renderer.endPass();
 
+    const Uint64 recordEnd = SDL_GetPerformanceCounter();
+    const double toMs = 1000.0 / static_cast<double>(SDL_GetPerformanceFrequency());
+    renderer.addCpuTime("prepare", static_cast<double>(recordStart - prepareStart) * toMs);
+    renderer.addCpuTime("record", static_cast<double>(recordEnd - recordStart) * toMs);
+    renderer.addCpuTime("frame", platform::deltaMs());
+
+    const Uint64 submitStart = SDL_GetPerformanceCounter();
     renderer.endFrame();
+    renderer.addCpuTime("submit+present", static_cast<double>(SDL_GetPerformanceCounter() - submitStart) * toMs);
 }
 
 // ============================================================================
@@ -624,6 +651,10 @@ void GameObject::renderVideoSettings() const {
     ui::drawText(cachedWindowCenter.x - 130, cachedWindowCenter.y + 35, 18, "Anti-Aliasing", textBrush);
     msaaBox.draw();
 
+    // Leaves
+    ui::drawText(cachedWindowCenter.x - 130, cachedWindowCenter.y + 95, 18, "Fancy Leaves", textBrush);
+    fancyLeavesBox.draw();
+
     backBtn.draw();
 }
 
@@ -733,6 +764,11 @@ void GameObject::handlePausedMouseInput(const platform::MouseState &ms) {
             msaaBox.handleClick(ms.x, ms.y,
                                 [this]() { msaaEnabled = true; },
                                 [this]() { msaaEnabled = false; });
+
+            // Leaves are baked into chunk meshes, so changing the style remeshes the world.
+            fancyLeavesBox.handleClick(ms.x, ms.y,
+                                       [] { setFancyLeaves(true); Planet::planet->remeshAll(); },
+                                       [] { setFancyLeaves(false); Planet::planet->remeshAll(); });
         } else if (gameState.menuState == MenuState::GAME) {
             backBtn.handleClick(ms.x, ms.y, [this]() {
                 gameState.menuState = MenuState::MAIN;

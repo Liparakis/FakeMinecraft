@@ -41,12 +41,16 @@ void Chunk::generateChunkMesh() {
     // Build into this thread's scratch buffers; they keep their capacity between meshes.
     thread_local std::vector<WorldVertex> scratchWorldVertices[NUM_SUBCHUNKS];
     thread_local std::vector<unsigned int> scratchWorldIndices[NUM_SUBCHUNKS];
+    thread_local std::vector<WorldVertex> scratchCutoutVertices[NUM_SUBCHUNKS];
+    thread_local std::vector<unsigned int> scratchCutoutIndices[NUM_SUBCHUNKS];
     thread_local std::vector<FluidVertex> scratchLiquidVertices[NUM_SUBCHUNKS];
     thread_local std::vector<unsigned int> scratchLiquidIndices[NUM_SUBCHUNKS];
     thread_local std::vector<BillboardVertex> scratchBillboardVertices[NUM_SUBCHUNKS];
     thread_local std::vector<unsigned int> scratchBillboardIndices[NUM_SUBCHUNKS];
     worldVertices = scratchWorldVertices;
     worldIndices = scratchWorldIndices;
+    cutoutVertices = scratchCutoutVertices;
+    cutoutIndices = scratchCutoutIndices;
     liquidVertices = scratchLiquidVertices;
     liquidIndices = scratchLiquidIndices;
     billboardVertices = scratchBillboardVertices;
@@ -54,6 +58,8 @@ void Chunk::generateChunkMesh() {
     for (int i = 0; i < NUM_SUBCHUNKS; ++i) {
         worldVertices[i].clear();
         worldIndices[i].clear();
+        cutoutVertices[i].clear();
+        cutoutIndices[i].clear();
         liquidVertices[i].clear();
         liquidIndices[i].clear();
         billboardVertices[i].clear();
@@ -77,11 +83,22 @@ void Chunk::generateChunkMesh() {
     mergeMeshes();
     worldVertices = nullptr;
     worldIndices = nullptr;
+    cutoutVertices = nullptr;
+    cutoutIndices = nullptr;
     liquidVertices = nullptr;
     liquidIndices = nullptr;
     billboardVertices = nullptr;
     billboardIndices = nullptr;
     generated = true;
+}
+
+void Chunk::emitQuad(const GreedyQuad &quad, const int subChunkIndex) {
+    const bool cutout = meshBlockTable().cutout[quad.blockId];
+    auto &vertices = cutout ? cutoutVertices[subChunkIndex] : worldVertices[subChunkIndex];
+    auto &indices = cutout ? cutoutIndices[subChunkIndex] : worldIndices[subChunkIndex];
+    // Indices are relative to the buffer the quad lands in, so the base is that buffer's size.
+    unsigned int base = static_cast<unsigned int>(vertices.size());
+    emitGreedyQuad(quad, worldPos, vertices, indices, base);
 }
 
 void Chunk::computeNeighborSkyTops() {
@@ -157,7 +174,7 @@ void Chunk::generateHorizontalFaces(unsigned int* currentVertex) {
                      topBlockId = upData ? upData->getBlock(x, 0, z) : Blocks::AIR;
                  }
                  
-                 if (table.showsFace[topBlockId]) topMask[x][z] = blockId;
+                 if (table.faceVisible(blockId, topBlockId)) topMask[x][z] = blockId;
 
                  // Check BOTTOM face
                  uint8_t bottomBlockId;
@@ -167,7 +184,7 @@ void Chunk::generateHorizontalFaces(unsigned int* currentVertex) {
                      bottomBlockId = downData ? downData->getBlock(x, CHUNK_HEIGHT - 1, z) : Blocks::AIR;
                  }
 
-                 if (table.showsFace[bottomBlockId]) bottomMask[x][z] = blockId;
+                 if (table.faceVisible(blockId, bottomBlockId)) bottomMask[x][z] = blockId;
              }
          }
     };
@@ -231,8 +248,7 @@ void Chunk::greedyMergeTopFaces(int y, int subChunkIndex, uint16_t topMask[][CHU
             // Get light level from adjacent air block (above this face)
             uint8_t light = (y + 1 < CHUNK_HEIGHT) ? lightMap[x * CHUNK_WIDTH * CHUNK_HEIGHT + z * CHUNK_HEIGHT + (y + 1)] : 0;
             GreedyQuad quad{x, y, z, width, height, blockId, TOP, light};
-            emitGreedyQuad(quad, worldPos, worldVertices[subChunkIndex],
-                          worldIndices[subChunkIndex], currentVertex[subChunkIndex]);
+            emitQuad(quad, subChunkIndex);
         }
     }
 }
@@ -274,8 +290,7 @@ void Chunk::greedyMergeBottomFaces(int y, int subChunkIndex, uint16_t bottomMask
 
             uint8_t light = (y - 1 >= 0) ? lightMap[x * CHUNK_WIDTH * CHUNK_HEIGHT + z * CHUNK_HEIGHT + (y - 1)] : 0;
             GreedyQuad quad{x, y, z, width, height, blockId, BOTTOM, light};
-            emitGreedyQuad(quad, worldPos, worldVertices[subChunkIndex],
-                          worldIndices[subChunkIndex], currentVertex[subChunkIndex]);
+            emitQuad(quad, subChunkIndex);
         }
     }
 }
@@ -362,7 +377,7 @@ void Chunk::generateZAxisFaces(unsigned int* currentVertex, uint16_t maskA[][CHU
                 // Neighbor Top index = idx - strideZ + 1 (if y < MAX)
                 {
                     const int nIdx = idx - strideZ;
-                    if (table.showsFace[rawData[nIdx]]) maskA[x][y] = blockId;
+                    if (table.faceVisible(blockId, rawData[nIdx])) maskA[x][y] = blockId;
                 }
 
                 // --- South Neighbor (Z+1) ---
@@ -370,7 +385,7 @@ void Chunk::generateZAxisFaces(unsigned int* currentVertex, uint16_t maskA[][CHU
                 // Neighbor index = idx + strideZ
                 {
                     int sIdx = idx + strideZ;
-                    if (table.showsFace[rawData[sIdx]]) maskB[x][y] = blockId;
+                    if (table.faceVisible(blockId, rawData[sIdx])) maskB[x][y] = blockId;
                 }
             }
         }
@@ -447,14 +462,14 @@ void Chunk::generateXAxisFaces(unsigned int* currentVertex, uint16_t maskA[][CHU
                 // Neighbor index = idx - strideX
                 {
                     int wIdx = idx - strideX;
-                    if (table.showsFace[rawData[wIdx]]) maskA[z][y] = blockId;
+                    if (table.faceVisible(blockId, rawData[wIdx])) maskA[z][y] = blockId;
                 }
 
                 // --- East Neighbor (X+1) ---
                 // Neighbor index = idx + strideX
                 {
                     int eIdx = idx + strideX;
-                    if (table.showsFace[rawData[eIdx]]) maskB[z][y] = blockId;
+                    if (table.faceVisible(blockId, rawData[eIdx])) maskB[z][y] = blockId;
                 }
             }
         }
@@ -504,7 +519,7 @@ void Chunk::greedyMergeNorthFaces(int z, uint16_t maskA[][CHUNK_HEIGHT],
             }
             
             GreedyQuad quad{x, y, z, width, height, id, NORTH, light};
-            emitGreedyQuad(quad, worldPos, worldVertices[subIdx], worldIndices[subIdx], currentVertex[subIdx]);
+            emitQuad(quad, subIdx);
         }
     }
 }
@@ -542,7 +557,7 @@ void Chunk::greedyMergeSouthFaces(int z, uint16_t maskB[][CHUNK_HEIGHT],
             }
 
             GreedyQuad quad{x, y, z, width, height, id, SOUTH, light};
-            emitGreedyQuad(quad, worldPos, worldVertices[subIdx], worldIndices[subIdx], currentVertex[subIdx]);
+            emitQuad(quad, subIdx);
         }
     }
 }
@@ -579,7 +594,7 @@ void Chunk::greedyMergeWestFaces(int x, uint16_t maskA[][CHUNK_HEIGHT],
             }
             
             GreedyQuad quad{x, y, z, width, height, id, WEST, light};
-            emitGreedyQuad(quad, worldPos, worldVertices[subIdx], worldIndices[subIdx], currentVertex[subIdx]);
+            emitQuad(quad, subIdx);
         }
     }
 }
@@ -616,7 +631,7 @@ void Chunk::greedyMergeEastFaces(int x, uint16_t maskB[][CHUNK_HEIGHT],
             }
             
             GreedyQuad quad{x, y, z, width, height, id, EAST, light};
-            emitGreedyQuad(quad, worldPos, worldVertices[subIdx], worldIndices[subIdx], currentVertex[subIdx]);
+            emitQuad(quad, subIdx);
         }
     }
 }

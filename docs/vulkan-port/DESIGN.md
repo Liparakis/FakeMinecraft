@@ -109,3 +109,33 @@ What changed:
   every pass stops at the chunk's highest non-air block. The sky-light pass stops
   at the first blocker. Generation fills columns in spans (checksums of generated
   chunks are byte-identical to before).
+
+## Frame time (2026-10-16, 4x MSAA, 1280x720, uncapped)
+
+A/B against the previous commit, same views, alternating runs:
+
+| View | Before | After |
+| --- | --- | --- |
+| Spawn, forests to the horizon | 204-213 FPS | 490-520 FPS |
+| Low over water next to a forest canopy | 194-202 FPS | ~370 FPS |
+
+`FAKEMC_PROFILE=1` prints GPU time per pass (timestamp queries) and CPU time per
+section every 2 s. At spawn the GPU frame went from 4.6 ms to ~1.4-1.7 ms:
+
+- **Shadow map cache** (1.3 ms → ~0). Re-rendered only when the snapped light
+  matrix changes (0.5° sun steps, 16-block camera steps), a caster near the
+  camera is (re)uploaded or removed, or shadows are toggled. The quantized sun
+  direction must stay exactly unit length, or float noise changes the matrix
+  every frame.
+- **Opaque/cutout split.** Leaves go in a separate alpha-tested mesh; opaque
+  terrain uses a shader without `discard`, so hidden fragments are rejected
+  before shading. Reflection clipping moved to `gl_ClipDistance`.
+- **Fast leaves by default** (cutout 1.6 → 0.4 ms). Faces between two leaf blocks
+  are skipped; "Fancy Leaves" in Video Settings restores them (remeshes the world).
+- **Hardware PCF.** Four filtered depth-compare taps replace 16 point samples.
+
+Not pursued: culling faces next to enclosed caves for distant chunks removed only
+10% of triangles and made meshing 65% slower. The remaining cost is geometry
+(~3.7 M opaque triangles per frame; quarter resolution barely changes it), so the
+next levers are per-direction face culling with indirect draws, or downsampled
+meshes for distant chunks.

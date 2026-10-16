@@ -203,6 +203,7 @@ void VkContext::pickDevice() {
     features2.pNext = &features13;
     features2.features.wideLines = supported.wideLines;
     features2.features.samplerAnisotropy = supported.samplerAnisotropy;
+    features2.features.shaderClipDistance = VK_TRUE; // Reflection pass clips in hardware.
 
     const float priority = 1.0f;
     VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};

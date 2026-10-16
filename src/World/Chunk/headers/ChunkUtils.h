@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <iostream>
 #include "Block.h"
@@ -12,21 +13,40 @@
 struct MeshBlockTable {
     bool greedy[256] = {};    ///< SOLID or LEAVES: meshed by the greedy face passes.
     bool showsFace[256] = {}; ///< LEAVES, TRANSPARENT, BILLBOARD or LIQUID: a solid face next to it is visible.
+    bool cutout[256] = {};    ///< Has see-through texels, so it goes in the alpha-tested cutout mesh.
+    bool leaves[256] = {};
+    /// Fancy leaves draw the faces between neighbouring leaf blocks too; fast leaves skip those
+    /// internal canopy layers, which are most of the leaf overdraw. Changed via setFancyLeaves.
+    std::atomic<bool> fancyLeaves{false};
+
+    /// Whether the face of `block` that touches `neighbor` needs to be drawn.
+    [[nodiscard]] bool faceVisible(const uint8_t block, const uint8_t neighbor) const {
+        return showsFace[neighbor] && (fancyLeaves.load(std::memory_order_relaxed) || !(leaves[block] && leaves[neighbor]));
+    }
 };
 
-inline const MeshBlockTable &meshBlockTable() {
-    static const MeshBlockTable table = [] {
-        MeshBlockTable t;
+inline MeshBlockTable &mutableMeshBlockTable() {
+    static MeshBlockTable table;
+    static const bool filled = [] {
+        MeshBlockTable &t = table;
         const auto &blocks = BlockRegistry::getInstance().getAllBlocks();
         for (const Block &b : blocks) {
             t.greedy[b.id] = b.blockType == Block::SOLID || b.blockType == Block::LEAVES;
             t.showsFace[b.id] = b.blockType == Block::LEAVES || b.blockType == Block::TRANSPARENT ||
                                 b.blockType == Block::BILLBOARD || b.blockType == Block::LIQUID;
+            t.cutout[b.id] = b.blockType == Block::LEAVES || b.blockType == Block::TRANSPARENT;
+            t.leaves[b.id] = b.blockType == Block::LEAVES;
         }
-        return t;
+        return true;
     }();
+    (void) filled;
     return table;
 }
+
+inline const MeshBlockTable &meshBlockTable() { return mutableMeshBlockTable(); }
+
+/// Switches leaf rendering; existing chunks keep their meshes until remeshed (Planet::remeshAll).
+inline void setFancyLeaves(const bool fancy) { mutableMeshBlockTable().fancyLeaves = fancy; }
 
 struct NeighborData {
     int block;

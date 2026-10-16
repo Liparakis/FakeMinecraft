@@ -27,7 +27,7 @@ struct LiquidFace {
 
 // Divides the chunk into smaller sections to help with performance.
 struct SubChunk {
-    unsigned int numTrianglesWorld{}, numTrianglesLiquid{}, numTrianglesBillboard{};
+    unsigned int numTrianglesWorld{}, numTrianglesCutout{}, numTrianglesLiquid{}, numTrianglesBillboard{};
     glm::vec3 cullingCenter;
     glm::vec3 cullingExtents;
     bool ready = false;
@@ -89,6 +89,8 @@ public:
     bool uploadMesh();
     // Helper functions to draw everything in the chunk at once.
     void renderAllSolid();
+    /// Leaves and other alpha-tested blocks; drawn after the opaque mesh with the cutout pipeline.
+    void renderAllCutout() const;
     void renderAllBillboard() const;
     void renderAllWater() const;
     /// Frees the GPU meshes once in-flight frames are done with them.
@@ -112,7 +114,7 @@ public:
     // ========================================================================
     // UTILITY FUNCTIONS
     // ========================================================================
-    [[nodiscard]] bool hasSolid() const { return static_cast<bool>(worldMesh); }
+    [[nodiscard]] bool hasSolid() const { return static_cast<bool>(worldMesh) || static_cast<bool>(cutoutMesh); }
     [[nodiscard]] bool hasBillboard() const { return static_cast<bool>(billboardMesh); }
     [[nodiscard]] bool hasWater() const { return static_cast<bool>(waterMesh); }
     [[nodiscard]] bool hasMesh() const { return hasSolid() || hasBillboard() || hasWater(); }
@@ -146,7 +148,7 @@ public:
     glm::vec3 cullingExtents;
 
     // One GPU mesh per geometry type, so each is a single draw call.
-    GpuMesh worldMesh, billboardMesh, waterMesh;
+    GpuMesh worldMesh, cutoutMesh, billboardMesh, waterMesh;
 
     // Sub-chunk data (kept for potential future per-sub-chunk culling)
     SubChunk subChunks[NUM_SUBCHUNKS];
@@ -166,16 +168,21 @@ private:
     void mergeMeshes();
 
     // Merged geometry from the last generateChunkMesh, waiting for uploadMesh (freed after upload).
-    std::vector<WorldVertex> mergedWorldVertices;
+    std::vector<WorldVertex> mergedWorldVertices, mergedCutoutVertices;
     std::vector<BillboardVertex> mergedBillboardVertices;
     std::vector<FluidVertex> mergedWaterVertices;
-    std::vector<uint32_t> mergedWorldIndices, mergedBillboardIndices, mergedWaterIndices;
+    std::vector<uint32_t> mergedWorldIndices, mergedCutoutIndices, mergedBillboardIndices, mergedWaterIndices;
     float meshMinY = 0.0f, meshMaxY = 0.0f;
 
     // Per-sub-chunk build buffers. They point at the meshing thread's scratch arrays (see
     // generateChunkMesh), so their capacity is reused instead of reallocated for every mesh.
     std::vector<WorldVertex> *worldVertices = nullptr;
     std::vector<unsigned int> *worldIndices = nullptr;
+    std::vector<WorldVertex> *cutoutVertices = nullptr;
+    std::vector<unsigned int> *cutoutIndices = nullptr;
+
+    /// Emits a greedy quad into the opaque or cutout buffers of its sub-chunk, by block type.
+    void emitQuad(const struct GreedyQuad &quad, int subChunkIndex);
     std::vector<FluidVertex> *liquidVertices = nullptr;
     std::vector<unsigned int> *liquidIndices = nullptr;
     std::vector<BillboardVertex> *billboardVertices = nullptr;

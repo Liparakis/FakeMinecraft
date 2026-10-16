@@ -60,6 +60,7 @@ set_target_properties(CPP_GAME PROPERTIES
 
 # Shaders are compiled to SPIR-V next to the other runtime assets.
 file(GLOB SHADER_SOURCES CONFIGURE_DEPENDS ${ASSETS_DIR}/shaders/*.vert ${ASSETS_DIR}/shaders/*.frag)
+file(GLOB SHADER_INCLUDES CONFIGURE_DEPENDS ${ASSETS_DIR}/shaders/*.glsl)
 set(SPIRV_FILES)
 foreach (SHADER ${SHADER_SOURCES})
     get_filename_component(SHADER_NAME ${SHADER} NAME)
@@ -68,7 +69,7 @@ foreach (SHADER ${SHADER_SOURCES})
             OUTPUT ${SPIRV}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${BUILD_ASSETS_DIR}/shaders
             COMMAND Vulkan::glslc ${SHADER} -o ${SPIRV}
-            DEPENDS ${SHADER} ${ASSETS_DIR}/shaders/common.glsl
+            DEPENDS ${SHADER} ${SHADER_INCLUDES}
             COMMENT "Compiling ${SHADER_NAME}")
     list(APPEND SPIRV_FILES ${SPIRV})
 endforeach ()

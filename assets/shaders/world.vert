@@ -13,9 +13,13 @@ layout(location = 3) out float vSkyLight;
 layout(location = 4) out float vBlockLight;
 layout(location = 5) out vec4 FragPosLightSpace;
 
+// Hardware clipping against the reflection plane, so the fragment shader needs no discard for it.
+out float gl_ClipDistance[1];
+
 void main() {
     vec4 worldPos = vec4(vec3(aPos.xyz), 1.0);
     gl_Position = frame.projection * frame.view * worldPos;
+    gl_ClipDistance[0] = dot(worldPos, frame.clipPlane);
     FragPos = worldPos.xyz;
     TexCoord = vec3(vec2(aPacked.xy), float(aLayerIndex));
     Normal = FACE_NORMALS[min(aPacked.z, 6u)];

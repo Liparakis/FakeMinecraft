@@ -183,6 +183,9 @@ void Planet::prepare(const glm::vec3 &cameraPos) {
             // Uploads are capped per frame so a burst of finished chunks can't stall one frame.
             if (chunksUploadedThisFrame < MAX_UPLOADS_PER_FRAME && chunk->uploadMesh()) {
                 ++chunksUploadedThisFrame;
+                if (std::abs(pos.x - newCamChunkX) <= shadowRadiusChunks() && std::abs(pos.z - newCamChunkZ) <= shadowRadiusChunks()) {
+                    shadowDirty = true;
+                }
             }
             chunksLoading.fetch_add(1, std::memory_order_relaxed);
         }
@@ -258,6 +261,7 @@ void Planet::prepare(const glm::vec3 &cameraPos) {
 
                 chunkPool.push_back(chunk);
                 chunks.erase(it);
+                shadowDirty = true;
             }
         }
 
@@ -295,14 +299,23 @@ void Planet::reportLoadProgress(const int readyNear, const int readyChunks) {
 void Planet::render() {
     Renderer &renderer = Renderer::get();
 
-    renderer.bindPipeline(PipelineId::World);
+    renderer.mark("main: sky");
+    // Opaque terrain first, front to back, so hidden fragments are rejected before shading;
+    // then the alpha-tested leaves.
+    renderer.bindPipeline(PipelineId::WorldOpaque);
     for (Chunk *const chunk : solidChunks) chunk->renderAllSolid();
+    renderer.mark("main: opaque");
+    renderer.bindPipeline(PipelineId::World);
+    for (Chunk *const chunk : solidChunks) chunk->renderAllCutout();
+    renderer.mark("main: cutout");
 
     renderer.bindPipeline(PipelineId::Billboard);
     for (Chunk *const chunk : billboardChunks) chunk->renderAllBillboard();
+    renderer.mark("main: plants");
 
     renderer.bindPipeline(PipelineId::Fluid);
     for (Chunk *const chunk : waterChunks) chunk->renderAllWater();
+    renderer.mark("main: water");
 }
 
 void Planet::renderShadows(const glm::mat4 &lightSpace) {
@@ -311,7 +324,7 @@ void Planet::renderShadows(const glm::mat4 &lightSpace) {
     // Shadow culling is implemented here to only render shadows for chunks near the player.
     const int camX = camChunkX.load(std::memory_order_relaxed);
     const int camZ = camChunkZ.load(std::memory_order_relaxed);
-    const int shadowRadius = static_cast<int>(shadowDistance / CHUNK_WIDTH) + 1;
+    const int shadowRadius = shadowRadiusChunks();
     
     // renderChunks is the render thread's snapshot; chunkList belongs to the chunk thread.
     shadowCasters.clear();
@@ -326,7 +339,10 @@ void Planet::renderShadows(const glm::mat4 &lightSpace) {
 
     renderer.bindPipeline(PipelineId::ShadowWorld);
     renderer.pushConstants(&lightSpace, sizeof(lightSpace));
-    for (Chunk *const chunk : shadowCasters) chunk->renderAllSolid();
+    for (Chunk *const chunk : shadowCasters) {
+        chunk->renderAllSolid();
+        chunk->renderAllCutout();
+    }
 
     // Plants and leaves cast shadows too.
     renderer.bindPipeline(PipelineId::ShadowBillboard);
@@ -366,8 +382,10 @@ void Planet::renderReflection(const glm::vec3 &cameraPos, const glm::mat4 &refle
     }
 
     Renderer &renderer = Renderer::get();
-    renderer.bindPipeline(PipelineId::World);
+    renderer.bindPipeline(PipelineId::WorldOpaque);
     for (Chunk *const chunk : reflectedChunks) chunk->renderAllSolid();
+    renderer.bindPipeline(PipelineId::World);
+    for (Chunk *const chunk : reflectedChunks) chunk->renderAllCutout();
     renderer.bindPipeline(PipelineId::Billboard);
     for (Chunk *const chunk : reflectedChunks) chunk->renderAllBillboard();
 }
@@ -478,6 +496,13 @@ bool Planet::dispatchWork() {
     for (const ChunkPos &pos : remesh) chunkGenPool.submit([this, pos] { remeshChunk(pos); });
     for (const ChunkPos &pos : build) chunkGenPool.submit([this, pos] { buildChunk(pos); });
     return !remesh.empty() || !build.empty();
+}
+
+void Planet::remeshAll() {
+    std::unique_lock lock(chunkMutex);
+    for (Chunk *chunk : chunkList) {
+        if (chunk->meshRequested && regenPending.insert(chunk->chunkPos).second) regenQueue.push(chunk->chunkPos);
+    }
 }
 
 bool Planet::neighborsLit(const ChunkPos pos) const {

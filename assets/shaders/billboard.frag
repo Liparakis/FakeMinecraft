@@ -9,9 +9,6 @@ layout(location = 2) in float vSkyLight;
 layout(location = 0) out vec4 FragColor;
 
 void main() {
-    if (dot(vec4(FragPos, 1.0), frame.clipPlane) < 0.0)
-        discard;
-
     vec4 texResult = texture(tex, TexCoord);
     if (texResult.a < 0.1)
         discard;

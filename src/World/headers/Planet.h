@@ -52,6 +52,10 @@ public:
      */
     void prepare(const glm::vec3& cameraPos);
 
+    /// Rebuilds every chunk's mesh in the background (e.g. after a graphics setting changed).
+    /// The old meshes keep drawing until the new ones are uploaded.
+    void remeshAll();
+
     /// Draws solid blocks, billboards and water from prepare()'s lists; must run inside the main pass.
     void render();
 
@@ -59,6 +63,10 @@ public:
     void renderShadows(const glm::mat4& lightSpace);
 
     float shadowDistance = 256.0f; // Half-width of the shadow map in blocks; also limits which chunks cast shadows
+    [[nodiscard]] int shadowRadiusChunks() const { return static_cast<int>(shadowDistance / CHUNK_WIDTH) + 1; }
+
+    /// True (once) if a shadow caster near the camera was uploaded or a chunk was removed since the last call.
+    bool consumeShadowDirty() { const bool dirty = shadowDirty; shadowDirty = false; return dirty; }
 
     /// View and projection of the camera mirrored below the water plane.
     struct ReflectionCamera {
@@ -188,6 +196,7 @@ private:
     std::vector<Chunk*> frustumVisibleChunks;
     std::vector<ChunkPos> toDeleteList;
     std::vector<Chunk*> shadowCasters;         ///< Scratch list for the shadow pass.
+    bool shadowDirty = true;                   ///< See consumeShadowDirty(); render thread only.
 
     /** @name Load timing (see LoadStats.h) @{ */
     static constexpr int NEAR_RADIUS = 4;      ///< The 9x9 chunks around the camera count as "nearby".

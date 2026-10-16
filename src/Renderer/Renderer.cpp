@@ -2,6 +2,7 @@
 
 #include <SDL2/SDL_vulkan.h>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -41,6 +42,7 @@ namespace {
         constexpr auto GE = VK_COMPARE_OP_GREATER_OR_EQUAL;
         switch (id) {
             case PipelineId::World: return {"world.vert", "world.frag", VertexLayout::Chunk, TRI, VK_CULL_MODE_BACK_BIT, true, true, GE, Blend::None, false};
+            case PipelineId::WorldOpaque: return {"world.vert", "world_opaque.frag", VertexLayout::Chunk, TRI, VK_CULL_MODE_BACK_BIT, true, true, GE, Blend::None, false};
             case PipelineId::Billboard: return {"billboard.vert", "billboard.frag", VertexLayout::Billboard, TRI, VK_CULL_MODE_NONE, true, true, GE, Blend::None, false};
             case PipelineId::Fluid: return {"fluid.vert", "fluid.frag", VertexLayout::Fluid, TRI, VK_CULL_MODE_NONE, true, true, GE, Blend::Alpha, false};
             case PipelineId::Sky: return {"sky.vert", "sky.frag", VertexLayout::PosUV, TRI, VK_CULL_MODE_NONE, false, false, GE, Blend::Additive, false};
@@ -165,6 +167,16 @@ void Renderer::init(SDL_Window *sdlWindow, const bool useVsync) {
                                VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 0.0f);
     linearClamp = makeSampler(VK_FILTER_LINEAR, VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_NEAREST,
                               VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 0.0f);
+    {
+        // Lit where the reference depth (fragment depth minus bias) is <= the stored depth.
+        VkSamplerCreateInfo info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        info.magFilter = info.minFilter = VK_FILTER_LINEAR;
+        info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        info.addressModeU = info.addressModeV = info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        info.compareEnable = VK_TRUE;
+        info.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        check(vkCreateSampler(ctx().device, &info, nullptr, &shadowSampler), "vkCreateSampler");
+    }
 
     shadowMap = ctx().createImage({SHADOW_SIZE, SHADOW_SIZE}, DEPTH_FORMAT,
                                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -183,6 +195,15 @@ void Renderer::init(SDL_Window *sdlWindow, const bool useVsync) {
 
     constexpr uint8_t white[4] = {255, 255, 255, 255};
     whiteTexture = createTexture(1, 1, VK_FORMAT_R8G8B8A8_UNORM, white, false);
+
+    if (const char *profile = std::getenv("FAKEMC_PROFILE"); profile && profile[0] == '1') {
+        VkQueryPoolCreateInfo queryInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        queryInfo.queryCount = Profiler::MAX_MARKS * VkContext::FRAMES_IN_FLIGHT;
+        check(vkCreateQueryPool(ctx().device, &queryInfo, nullptr, &profiler.pool), "vkCreateQueryPool");
+        profiler.nsPerTick = ctx().properties.limits.timestampPeriod;
+        profiler.enabled = true;
+    }
 
     for (FrameResources &frame : frames) {
         frame.mainUniforms = ctx().createBuffer(sizeof(FrameUniforms), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true);
@@ -268,7 +289,7 @@ void Renderer::writeFrameSets() {
         for (const bool reflection : {false, true}) {
             const VkDescriptorBufferInfo uniforms{reflection ? frame.reflectionUniforms.buffer : frame.mainUniforms.buffer, 0, sizeof(FrameUniforms)};
             const VkDescriptorImageInfo blocks{blockSampler, textureArray.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-            const VkDescriptorImageInfo shadow{nearestClamp, shadowMap.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            const VkDescriptorImageInfo shadow{shadowSampler, shadowMap.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
             // The reflection pass cannot sample the image it renders into, so it gets a white texture.
             const VkDescriptorImageInfo reflected{linearClamp, reflection ? textures[whiteTexture].view : reflectionColor.view,
                                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
@@ -315,8 +336,10 @@ void Renderer::shutdown() {
     ctx().destroyImage(reflectionColor);
     ctx().destroyImage(reflectionDepth);
 
+    if (profiler.pool) vkDestroyQueryPool(device, profiler.pool, nullptr);
     vkDestroySampler(device, blockSampler, nullptr);
     vkDestroySampler(device, nearestClamp, nullptr);
+    vkDestroySampler(device, shadowSampler, nullptr);
     vkDestroySampler(device, linearClamp, nullptr);
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
     vkDestroyDescriptorPool(device, descriptorPool, nullptr);
@@ -550,6 +573,7 @@ bool Renderer::beginFrame() {
     frame.transientUsed = 0;
     frame.stagingUsed = 0;
     recording = true;
+    collectProfile();
     return true;
 }
 
@@ -749,6 +773,8 @@ void Renderer::beginUIPass() {
 void Renderer::endPass() {
     const VkCommandBuffer cmd = ctx().cmd();
     vkCmdEndRendering(cmd);
+    static constexpr const char *PASS_NAMES[] = {"none", "shadow", "reflection", "main", "ui"};
+    mark(PASS_NAMES[static_cast<int>(target)]);
 
     if (target == Target::Shadow) {
         imageBarrier(cmd, shadowMap.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
@@ -948,4 +974,63 @@ VkPipeline Renderer::buildPipeline(const PipelineKey &key) {
     VkPipeline pipeline;
     check(vkCreateGraphicsPipelines(ctx().device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline), "vkCreateGraphicsPipelines");
     return pipeline;
+}
+
+void Renderer::Profiler::accumulate(std::vector<std::pair<const char *, double>> &into, const char *section, const double ms) {
+    for (auto &[name, total] : into) {
+        if (name == section) {
+            total += ms;
+            return;
+        }
+    }
+    into.emplace_back(section, ms);
+}
+
+void Renderer::mark(const char *section) {
+    if (!profiler.enabled || !recording) return;
+    const uint32_t slot = ctx().currentFrame();
+    uint32_t &count = profiler.count[slot];
+    if (count >= Profiler::MAX_MARKS) return;
+    vkCmdWriteTimestamp2(ctx().cmd(), VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, profiler.pool, slot * Profiler::MAX_MARKS + count);
+    profiler.labels[slot][count++] = section;
+}
+
+void Renderer::addCpuTime(const char *section, const double ms) {
+    if (profiler.enabled) profiler.accumulate(profiler.cpu, section, ms);
+}
+
+void Renderer::collectProfile() {
+    if (!profiler.enabled) return;
+    const uint32_t slot = ctx().currentFrame();
+    uint32_t &count = profiler.count[slot];
+
+    // This slot's previous frame has finished (its fence was waited on), so its timestamps are ready.
+    if (count > 1) {
+        uint64_t ticks[Profiler::MAX_MARKS];
+        if (vkGetQueryPoolResults(ctx().device, profiler.pool, slot * Profiler::MAX_MARKS, count, sizeof(ticks), ticks,
+                                  sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+            for (uint32_t i = 1; i < count; ++i) {
+                profiler.accumulate(profiler.gpu, profiler.labels[slot][i], (ticks[i] - ticks[i - 1]) * profiler.nsPerTick * 1e-6);
+            }
+            profiler.accumulate(profiler.gpu, "TOTAL", (ticks[count - 1] - ticks[0]) * profiler.nsPerTick * 1e-6);
+            ++profiler.frames;
+        }
+    }
+
+    const double now = static_cast<double>(SDL_GetTicks());
+    if (now - profiler.lastReport >= 2000.0 && profiler.frames > 0) {
+        std::cout << "[PROFILE] " << profiler.frames << " frames, avg ms | GPU:";
+        for (const auto &[name, total] : profiler.gpu) std::cout << " " << name << " " << total / profiler.frames;
+        std::cout << " | CPU:";
+        for (const auto &[name, total] : profiler.cpu) std::cout << " " << name << " " << total / profiler.frames;
+        std::cout << std::endl;
+        profiler.gpu.clear();
+        profiler.cpu.clear();
+        profiler.frames = 0;
+        profiler.lastReport = now;
+    }
+
+    vkCmdResetQueryPool(ctx().cmd(), profiler.pool, slot * Profiler::MAX_MARKS, Profiler::MAX_MARKS);
+    count = 0;
+    mark("start");
 }

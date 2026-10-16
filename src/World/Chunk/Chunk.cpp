@@ -47,6 +47,8 @@ void Chunk::reset(ChunkPos newPos) {
     meshRequested = false;
     releaseMeshes();
     std::vector<WorldVertex>().swap(mergedWorldVertices);
+    std::vector<WorldVertex>().swap(mergedCutoutVertices);
+    std::vector<uint32_t>().swap(mergedCutoutIndices);
     std::vector<BillboardVertex>().swap(mergedBillboardVertices);
     std::vector<FluidVertex>().swap(mergedWaterVertices);
     std::vector<uint32_t>().swap(mergedWorldIndices);
